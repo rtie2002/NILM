@@ -1,0 +1,2 @@
+# Ignore nilmtk directory - it's a toolbox, no need to commit
+nilmtk/
