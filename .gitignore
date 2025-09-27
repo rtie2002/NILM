@@ -11,3 +11,8 @@ __pycache__/
 
 # Ignore nilmtk directory - it's a toolbox, no need to commit
 nilmtk/
+
+# Ignore datasets folder - contains data files that shouldn't be committed
+datasets/
+
+
