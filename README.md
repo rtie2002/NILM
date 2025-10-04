@@ -5,17 +5,14 @@
 ### 1. Install UV (Fast Python Package Installer)
 
 ```powershell
-powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
+pip install uv
 ```
 
 ### 2. Start Virtual Environment
 
 ```powershell
 cd 'c:\Users\Raymond Tie\Desktop\NILM'
-.\venv\Scripts\activate
-```
-
-### 3. Install nilmtk packages
+stall nilmtk packages
 
 ```bash
 uv pip install git+https://github.com/nilmtk/nilmtk.git
