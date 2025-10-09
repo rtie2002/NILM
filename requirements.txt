@@ -1,12 +1,56 @@
-numpy>=1.21.0
-pandas>=1.3.0
-matplotlib>=3.4.0
-scikit-learn>=0.24.0
-scipy>=1.7.0
+# Core NILMTK dependencies
+numpy>=1.24.0
+pandas>=2.0.0
+matplotlib>=3.7.0
+scikit-learn>=1.3.0
+scipy>=1.11.0
 jupyter>=1.0.0
-nilm_metadata>=0.2.0
-nilmtk>=0.4.0
-h5py>=3.1.0
-pytorch>=1.9.0
+h5py>=3.9.0
+tqdm>=4.65.0
+
+# NILMTK specific dependencies
+ipython>=8.7.0
+nilm_metadata @ git+https://github.com/nilmtk/nilm_metadata.git
+nose
+tables>=3.8.0
+networkx>=3.0
+hmmlearn>=0.3.0
+pyyaml>=6.0
+
+# NILMTK-contrib dependencies
+tensorflow-io-gcs-filesystem==0.31.0
+tensorflow>=2.12.0,<2.16.0
+cvxpy>=1.0.0
+torch>=2.0,<2.7
 torchvision>=0.10.0
-tqdm>=4.61.0
+
+# Torch-NILM dependencies
+pytorch-lightning>=1.3.6
+torchmetrics>=0.3.2
+wandb>=0.10.32
+dash>=2.0.0
+plotly>=5.4.0
+seaborn>=0.11.2
+scikit-image>=0.18.2
+numba>=0.53.1
+loguru>=0.5.3
+
+# Deep-NILMTK dependencies
+mlflow>=1.23.1
+optuna>=2.10.0
+
+# NeuralNILM_Pytorch dependencies
+torchsummary>=1.5.1
+absl-py>=0.10.0
+joblib>=0.16.0
+
+# NILM-analyzer dependencies
+dask>=2021.06.2
+
+# Local nilmtk installations (cloned repositories)
+-e ./toolkit/nilmtk
+-e ./toolkit/nilmtk-contrib
+-e ./toolkit/torch-nilm
+-e ./toolkit/deep-nilmtk-v1
+-e ./toolkit/NeuralNILM_Pytorch
+-e ./toolkit/nilm_analyzer

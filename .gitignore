@@ -15,4 +15,5 @@ nilmtk/
 # Ignore datasets folder - contains data files that shouldn't be committed
 datasets/
 
-#
+# Toolkits
+toolkit/
