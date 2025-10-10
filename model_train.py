@@ -10,6 +10,79 @@ import time
 import pandas as pd
 from cnn_model import NILMCNN
 from preprocessing import NILMPreprocessor
+from sklearn.metrics import mean_squared_error, mean_absolute_error, f1_score, recall_score, precision_score, matthews_corrcoef
+
+# Standard NILM metrics (from toolkit)
+on_threshold = {'washer dryer': 20, 'fridge': 50, 'kettle': 2000, 'dish washer': 10, 'washing machine': 20, 'drill': 0}
+
+def mae(app_name, app_gt, app_pred):
+    """Mean Absolute Error"""
+    return mean_absolute_error(app_gt, app_pred)
+
+def rmse(app_name, app_gt, app_pred):
+    """Root Mean Square Error"""
+    return mean_squared_error(app_gt, app_pred)**0.5
+
+def rmae(app_name, app_gt, app_pred):
+    """Relative Mean Absolute Error"""
+    constant = 1
+    numerator = np.abs(app_gt - app_pred)
+    max_temp = np.where(app_gt > app_pred, app_gt, app_pred)
+    denominator = constant + max_temp
+    return np.mean(numerator/denominator)
+
+def nep(app_name, app_gt, app_pred):
+    """Normalized Error in Total Power"""
+    numerator = np.sum(np.abs(app_gt - app_pred))
+    denominator = np.sum(np.abs(app_gt))
+    return numerator/denominator if denominator > 0 else 0
+
+def omae(app_name, app_gt, app_pred):
+    """On-state Mean Absolute Error (only when appliance is ON)"""
+    threshold = on_threshold.get(app_name, 10)
+    gt_temp = np.array(app_gt)
+    idx = gt_temp > threshold
+    if np.sum(idx) == 0:
+        return 0
+    gt_temp = gt_temp[idx]
+    pred_temp = np.array(app_pred)[idx]
+    return mae(app_name, gt_temp, pred_temp)
+
+def f1score(app_name, app_gt, app_pred):
+    """F1 Score for ON/OFF classification"""
+    threshold = on_threshold.get(app_name, 10)
+    gt_temp = np.array(app_gt)
+    gt_temp = np.where(gt_temp < threshold, 0, 1)
+    pred_temp = np.array(app_pred)
+    pred_temp = np.where(pred_temp < threshold, 0, 1)
+    return f1_score(gt_temp, pred_temp)
+
+def recall(app_name, app_gt, app_pred):
+    """Recall for ON/OFF classification"""
+    threshold = on_threshold.get(app_name, 10)
+    gt_temp = np.array(app_gt)
+    gt_temp = np.where(gt_temp < threshold, 0, 1)
+    pred_temp = np.array(app_pred)
+    pred_temp = np.where(pred_temp < threshold, 0, 1)
+    return recall_score(gt_temp, pred_temp)
+
+def precision(app_name, app_gt, app_pred):
+    """Precision for ON/OFF classification"""
+    threshold = on_threshold.get(app_name, 10)
+    gt_temp = np.array(app_gt)
+    gt_temp = np.where(gt_temp < threshold, 0, 1)
+    pred_temp = np.array(app_pred)
+    pred_temp = np.where(pred_temp < threshold, 0, 1)
+    return precision_score(gt_temp, pred_temp)
+
+def mcc(app_name, app_gt, app_pred):
+    """Matthews Correlation Coefficient"""
+    threshold = on_threshold.get(app_name, 10)
+    gt_temp = np.array(app_gt)
+    gt_temp = np.where(gt_temp < threshold, 0, 1)
+    pred_temp = np.array(app_pred)
+    pred_temp = np.where(pred_temp < threshold, 0, 1)
+    return matthews_corrcoef(gt_temp, pred_temp)
 
 class NILMDataset(Dataset):
     def __init__(self, X, y):
@@ -80,6 +153,9 @@ def train_model_process(model, train_dataloader, val_dataloader, epochs):
 
         # Training phase
         model.train()
+        train_mae = 0.0
+        train_rmse = 0.0
+        
         for step, (b_x, b_y) in enumerate(train_dataloader):
             b_x = b_x.to(device)
             b_y = b_y.to(device)
@@ -93,13 +169,27 @@ def train_model_process(model, train_dataloader, val_dataloader, epochs):
             train_loss += loss.item() * b_x.size(0)
             train_num += b_x.size(0)
             
-            # Show progress every 1000 batches
+            # Calculate NILM metrics for this batch
+            with torch.no_grad():
+                batch_mae = mae('washer dryer', b_y.cpu().numpy().flatten(), output.cpu().numpy().flatten())
+                batch_rmse = rmse('washer dryer', b_y.cpu().numpy().flatten(), output.cpu().numpy().flatten())
+                train_mae += batch_mae * b_x.size(0)
+                train_rmse += batch_rmse * b_x.size(0)
+            
+            # Show progress every 1000 batches with NILM metrics
             if step % 1000 == 0:
                 current_loss = train_loss / train_num
-                print(f"  Batch {step}/{len(train_dataloader)} - Current Loss: {current_loss:.4f}")
+                current_mae = train_mae / train_num
+                current_rmse = train_rmse / train_num
+                print(f"  Batch {step}/{len(train_dataloader)} - Loss: {current_loss:.4f}, MAE: {current_mae:.4f}, RMSE: {current_rmse:.4f}")
         
         # Validation phase
         model.eval()
+        val_mae = 0.0
+        val_rmse = 0.0
+        val_f1 = 0.0
+        val_omae = 0.0
+        
         with torch.no_grad():
             for step, (b_x, b_y) in enumerate(val_dataloader):
                 b_x = b_x.to(device)
@@ -111,20 +201,42 @@ def train_model_process(model, train_dataloader, val_dataloader, epochs):
                 val_loss += loss.item() * b_x.size(0)
                 val_num += b_x.size(0)
                 
-                # Show validation progress every 500 batches
+                # Calculate NILM metrics for this batch
+                batch_mae = mae('washer dryer', b_y.cpu().numpy().flatten(), output.cpu().numpy().flatten())
+                batch_rmse = rmse('washer dryer', b_y.cpu().numpy().flatten(), output.cpu().numpy().flatten())
+                batch_f1 = f1score('washer dryer', b_y.cpu().numpy().flatten(), output.cpu().numpy().flatten())
+                batch_omae = omae('washer dryer', b_y.cpu().numpy().flatten(), output.cpu().numpy().flatten())
+                
+                val_mae += batch_mae * b_x.size(0)
+                val_rmse += batch_rmse * b_x.size(0)
+                val_f1 += batch_f1 * b_x.size(0)
+                val_omae += batch_omae * b_x.size(0)
+                
+                # Show validation progress every 500 batches with NILM metrics
                 if step % 500 == 0:
                     current_val_loss = val_loss / val_num
-                    print(f"  Val Batch {step}/{len(val_dataloader)} - Current Val Loss: {current_val_loss:.4f}")
+                    current_val_mae = val_mae / val_num
+                    current_val_rmse = val_rmse / val_num
+                    current_val_f1 = val_f1 / val_num
+                    current_val_omae = val_omae / val_num
+                    print(f"  Val Batch {step}/{len(val_dataloader)} - Loss: {current_val_loss:.4f}, MAE: {current_val_mae:.4f}, RMSE: {current_val_rmse:.4f}, F1: {current_val_f1:.4f}, OMAE: {current_val_omae:.4f}")
         
-        # Calculate average losses
+        # Calculate average losses and metrics
         avg_train_loss = train_loss / train_num
         avg_val_loss = val_loss / val_num
+        avg_train_mae = train_mae / train_num
+        avg_train_rmse = train_rmse / train_num
+        avg_val_mae = val_mae / val_num
+        avg_val_rmse = val_rmse / val_num
+        avg_val_f1 = val_f1 / val_num
+        avg_val_omae = val_omae / val_num
         
         train_losses_all.append(avg_train_loss)
         val_losses_all.append(avg_val_loss)
         
-        print(f"Train Loss: {avg_train_loss:.4f}")
-        print(f"Val Loss: {avg_val_loss:.4f}")
+        # Display comprehensive NILM metrics
+        print(f"Train - Loss: {avg_train_loss:.4f}, MAE: {avg_train_mae:.4f}, RMSE: {avg_train_rmse:.4f}")
+        print(f"Val   - Loss: {avg_val_loss:.4f}, MAE: {avg_val_mae:.4f}, RMSE: {avg_val_rmse:.4f}, F1: {avg_val_f1:.4f}, OMAE: {avg_val_omae:.4f}")
         
         # Calculate time per epoch
         epoch_time = time.time() - since
@@ -142,15 +254,20 @@ def train_model_process(model, train_dataloader, val_dataloader, epochs):
         since = time.time()  # Reset timer for next epoch
 
     # Load best model
+    print("Loading best model weights...")
     model.load_state_dict(best_model_wts)
+    print("Best model loaded successfully!")
     
+    print("Creating training history DataFrame...")
     train_process = pd.DataFrame(data = {"epoch": range(epochs), 
                                          "train_loss": train_losses_all, 
                                          "val_loss": val_losses_all})
+    print("DataFrame created successfully!")
     
     return train_process
 
 def matplot_loss(train_process):
+    print("Creating loss plot...")
     plt.figure(figsize=(10, 6))
     plt.plot(train_process["epoch"], train_process["train_loss"], 'ro-', label="Train Loss")
     plt.plot(train_process["epoch"], train_process["val_loss"], 'bo-', label="Val Loss")
@@ -159,7 +276,9 @@ def matplot_loss(train_process):
     plt.ylabel("MSE Loss")
     plt.title("Training and Validation Loss")
     plt.grid(True)
+    print("Plot created, showing...")
     plt.show()
+    print("Plot displayed successfully!")
 
 
 if __name__ == "__main__":
@@ -170,10 +289,14 @@ if __name__ == "__main__":
     train_dataloader, val_dataloader = load_nilm_data()
     
     # Train model
+    print("Starting training...")
     train_process = train_model_process(model, train_dataloader, val_dataloader, epochs=10)
+    print("Training completed!")
     
     # Plot results
+    print("Starting to plot results...")
     matplot_loss(train_process)
+    print("All done!")
 
 
 
