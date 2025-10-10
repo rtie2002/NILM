@@ -1,365 +1,179 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset
+import torch.utils.data as Data
 import numpy as np
 import matplotlib.pyplot as plt
 import copy
 import time
-import os
 import pandas as pd
-from cnn_model import NILM_CNN, NILM_CNN_Simple
-from nilm_dataset import NILMDataManager
+from cnn_model import NILMCNN
+from preprocessing import NILMPreprocessor
 
-def load_nilm_data(dataset_path, target_appliance, window_size=99, batch_size=32):
-    """
-    Load and preprocess NILM data for training
-    
-    Args:
-        dataset_path (str): Path to the HDF5 dataset file
-        target_appliance (str): Name of the target appliance
-        window_size (int): Size of sliding window
-        batch_size (int): Batch size for training
+class NILMDataset(Dataset):
+    def __init__(self, X, y):
+        self.X = torch.FloatTensor(X)
+        self.y = torch.FloatTensor(y)
         
-    Returns:
-        tuple: (train_loader, val_loader, test_loader, data_stats)
-    """
-    print("="*60)
-    print("LOADING NILM DATA")
-    print("="*60)
+    def __len__(self):
+        return len(self.X)
     
-    # Initialize data manager
-    data_manager = NILMDataManager(dataset_path)
+    def __getitem__(self, idx):
+        # Reshape for 1D CNN: (batch_size, 1, window_size)
+        x = self.X[idx].unsqueeze(0)  # Add channel dimension
+        y = self.y[idx]
+        return x, y
+
+def load_nilm_data():
+    # Load preprocessed data
+    DATASET_PATH = r"C:\Users\Raymond Tie\Desktop\NILM\datasets\ukdale.h5"
+    TARGET_APPLIANCES = ['washer dryer']
     
-    # Load and preprocess data
-    processed_data = data_manager.load_and_preprocess_data(
-        target_appliances=[target_appliance],
-        train_months=6,  # 6 months of training data
-        test_months=1,   # 1 month of test data
-        window_size=window_size,
-        stride=1,
-        force_reprocess=False  # Use cached data if available
-    )
+    preprocessor = NILMPreprocessor(DATASET_PATH)
+    train_start, train_end, test_start, test_end = preprocessor.set_time_windows()
     
-    # Create data loaders
-    train_loader, val_loader, test_loader = data_manager.create_dataloaders(
-        target_appliance=target_appliance,
-        batch_size=batch_size,
-        num_workers=4
-    )
+    # Load data
+    preprocessor.load_training_data(train_start, train_end, TARGET_APPLIANCES)
+    preprocessor.load_testing_data(test_start, test_end, TARGET_APPLIANCES)
     
-    # Get data statistics
-    data_stats = data_manager.get_data_stats()
+    # Create windows and normalize
+    processed_data = preprocessor.create_windows_and_normalize(window_size=99, stride=1)
     
-    return train_loader, val_loader, test_loader, data_stats
+    # Create datasets
+    train_dataset = NILMDataset(processed_data['X_train'], processed_data['y_train']['washer dryer'])
+    val_dataset = NILMDataset(processed_data['X_val'], processed_data['y_val']['washer dryer'])
+    
+    # Create dataloaders
+    train_dataloader = DataLoader(train_dataset, batch_size=32, shuffle=True)
+    val_dataloader = DataLoader(val_dataset, batch_size=32, shuffle=False)
+    
+    return train_dataloader, val_dataloader
 
 
-def train_nilm_model(model, train_loader, val_loader, epochs, device, model_save_path):
-    """
-    Train NILM model with proper regression loss and metrics
-    
-    Args:
-        model: NILM CNN model
-        train_loader: Training data loader
-        val_loader: Validation data loader
-        epochs: Number of training epochs
-        device: Device to train on (cuda/cpu)
-        model_save_path: Path to save the best model
-        
-    Returns:
-        dict: Training history with losses and metrics
-    """
-    print("="*60)
-    print("TRAINING NILM MODEL")
-    print("="*60)
-    
-    # Move model to device
-    model = model.to(device)
-    
-    # Use MSE loss for regression (not CrossEntropy for classification)
-    criterion = nn.MSELoss()
-    optimizer = optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-5)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5)
-    
+def train_model_process(model, train_dataloader, val_dataloader, epochs):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model.to(device)
+
+    optimizer = optim.Adam(model.parameters(), lr=0.001)
+    criterion = nn.MSELoss()  # Use MSE Loss for regression
+
     # Store the best model weights
     best_model_wts = copy.deepcopy(model.state_dict())
-    best_val_loss = float('inf')
-    
-    # Training history
-    train_losses = []
-    val_losses = []
-    train_maes = []
-    val_maes = []
-    
+    best_loss = float('inf')
+
+    # Training and validation losses
+    train_losses_all = []
+    val_losses_all = []
+
     since = time.time()
     
+
     for epoch in range(epochs):
         print(f"Epoch {epoch+1}/{epochs}")
-        print("-" * 30)
-        
+        print("-" * 10)
+
+        train_loss = 0.0
+        val_loss = 0.0
+        train_num = 0
+        val_num = 0
+
         # Training phase
         model.train()
-        train_loss = 0.0
-        train_mae = 0.0
-        train_samples = 0
-        
-        for batch_idx, (mains_batch, appliance_batch) in enumerate(train_loader):
-            # Move data to device
-            mains_batch = mains_batch.to(device)
-            appliance_batch = appliance_batch.to(device)
-            
-            # Forward pass
+        for step, (b_x, b_y) in enumerate(train_dataloader):
+            b_x = b_x.to(device)
+            b_y = b_y.to(device)
+
             optimizer.zero_grad()
-            outputs = model(mains_batch)
-            loss = criterion(outputs, appliance_batch)
-            
-            # Backward pass
+            output = model(b_x)
+            loss = criterion(output, b_y)
             loss.backward()
             optimizer.step()
+
+            train_loss += loss.item() * b_x.size(0)
+            train_num += b_x.size(0)
             
-            # Calculate metrics
-            train_loss += loss.item() * mains_batch.size(0)
-            mae = torch.mean(torch.abs(outputs - appliance_batch)).item()
-            train_mae += mae * mains_batch.size(0)
-            train_samples += mains_batch.size(0)
-            
-            # Print progress
-            if batch_idx % 50 == 0:
-                print(f"  Batch {batch_idx}/{len(train_loader)}: Loss={loss.item():.6f}, MAE={mae:.6f}")
+            # Show progress every 1000 batches
+            if step % 1000 == 0:
+                current_loss = train_loss / train_num
+                print(f"  Batch {step}/{len(train_dataloader)} - Current Loss: {current_loss:.4f}")
         
         # Validation phase
         model.eval()
-        val_loss = 0.0
-        val_mae = 0.0
-        val_samples = 0
-        
         with torch.no_grad():
-            for mains_batch, appliance_batch in val_loader:
-                mains_batch = mains_batch.to(device)
-                appliance_batch = appliance_batch.to(device)
+            for step, (b_x, b_y) in enumerate(val_dataloader):
+                b_x = b_x.to(device)
+                b_y = b_y.to(device)
+
+                output = model(b_x)
+                loss = criterion(output, b_y)
+
+                val_loss += loss.item() * b_x.size(0)
+                val_num += b_x.size(0)
                 
-                outputs = model(mains_batch)
-                loss = criterion(outputs, appliance_batch)
-                
-                val_loss += loss.item() * mains_batch.size(0)
-                mae = torch.mean(torch.abs(outputs - appliance_batch)).item()
-                val_mae += mae * mains_batch.size(0)
-                val_samples += mains_batch.size(0)
+                # Show validation progress every 500 batches
+                if step % 500 == 0:
+                    current_val_loss = val_loss / val_num
+                    print(f"  Val Batch {step}/{len(val_dataloader)} - Current Val Loss: {current_val_loss:.4f}")
         
-        # Calculate average metrics
-        avg_train_loss = train_loss / train_samples
-        avg_val_loss = val_loss / val_samples
-        avg_train_mae = train_mae / train_samples
-        avg_val_mae = val_mae / val_samples
+        # Calculate average losses
+        avg_train_loss = train_loss / train_num
+        avg_val_loss = val_loss / val_num
         
-        # Store metrics
-        train_losses.append(avg_train_loss)
-        val_losses.append(avg_val_loss)
-        train_maes.append(avg_train_mae)
-        val_maes.append(avg_val_mae)
+        train_losses_all.append(avg_train_loss)
+        val_losses_all.append(avg_val_loss)
         
-        # Learning rate scheduling
-        scheduler.step(avg_val_loss)
+        print(f"Train Loss: {avg_train_loss:.4f}")
+        print(f"Val Loss: {avg_val_loss:.4f}")
         
-        print(f"Train Loss: {avg_train_loss:.6f}, Train MAE: {avg_train_mae:.6f}")
-        print(f"Val Loss: {avg_val_loss:.6f}, Val MAE: {avg_val_mae:.6f}")
-        print(f"Learning Rate: {optimizer.param_groups[0]['lr']:.2e}")
-        
+        # Calculate time per epoch
+        epoch_time = time.time() - since
+        print(f"Epoch {epoch+1} completed in {epoch_time:.1f}s")
+        print(f"Best Val Loss so far: {best_loss:.4f}")
+        print("=" * 50)
+
         # Save best model
-        if avg_val_loss < best_val_loss:
-            best_val_loss = avg_val_loss
+        if avg_val_loss < best_loss:
+            best_loss = avg_val_loss
             best_model_wts = copy.deepcopy(model.state_dict())
-            torch.save(model.state_dict(), model_save_path)
-            print(f"✓ New best model saved! Val Loss: {best_val_loss:.6f}")
+            torch.save(model.state_dict(), 'model_train.pth')
+            print("🎉 New best model saved!")
         
-        print()
-    
-    # Load best model weights
+        since = time.time()  # Reset timer for next epoch
+
+    # Load best model
     model.load_state_dict(best_model_wts)
     
-    # Training time
-    time_elapsed = time.time() - since
-    print(f"Training completed in {time_elapsed//60:.0f}m {time_elapsed%60:.0f}s")
-    print(f"Best validation loss: {best_val_loss:.6f}")
+    train_process = pd.DataFrame(data = {"epoch": range(epochs), 
+                                         "train_loss": train_losses_all, 
+                                         "val_loss": val_losses_all})
     
-    # Create training history
-    training_history = {
-        'epoch': list(range(1, epochs + 1)),
-        'train_loss': train_losses,
-        'val_loss': val_losses,
-        'train_mae': train_maes,
-        'val_mae': val_maes
-    }
-    
-    return training_history
+    return train_process
 
-def plot_training_history(training_history):
-    """
-    Plot training history for NILM model
-    
-    Args:
-        training_history (dict): Training history with losses and metrics
-    """
-    fig, axes = plt.subplots(1, 2, figsize=(15, 5))
-    
-    # Plot losses
-    axes[0].plot(training_history['epoch'], training_history['train_loss'], 'r-', label='Train Loss', linewidth=2)
-    axes[0].plot(training_history['epoch'], training_history['val_loss'], 'b-', label='Val Loss', linewidth=2)
-    axes[0].set_xlabel('Epoch')
-    axes[0].set_ylabel('MSE Loss')
-    axes[0].set_title('Training and Validation Loss')
-    axes[0].legend()
-    axes[0].grid(True, alpha=0.3)
-    
-    # Plot MAE
-    axes[1].plot(training_history['epoch'], training_history['train_mae'], 'r-', label='Train MAE', linewidth=2)
-    axes[1].plot(training_history['epoch'], training_history['val_mae'], 'b-', label='Val MAE', linewidth=2)
-    axes[1].set_xlabel('Epoch')
-    axes[1].set_ylabel('Mean Absolute Error')
-    axes[1].set_title('Training and Validation MAE')
-    axes[1].legend()
-    axes[1].grid(True, alpha=0.3)
-    
-    plt.tight_layout()
+def matplot_loss(train_process):
+    plt.figure(figsize=(10, 6))
+    plt.plot(train_process["epoch"], train_process["train_loss"], 'ro-', label="Train Loss")
+    plt.plot(train_process["epoch"], train_process["val_loss"], 'bo-', label="Val Loss")
+    plt.legend()
+    plt.xlabel("Epoch")
+    plt.ylabel("MSE Loss")
+    plt.title("Training and Validation Loss")
+    plt.grid(True)
     plt.show()
 
 
-def evaluate_model(model, test_loader, device, data_stats):
-    """
-    Evaluate the trained model on test data
-    
-    Args:
-        model: Trained NILM model
-        test_loader: Test data loader
-        device: Device to run evaluation on
-        data_stats: Data statistics for denormalization
-        
-    Returns:
-        dict: Evaluation metrics
-    """
-    print("="*60)
-    print("EVALUATING MODEL")
-    print("="*60)
-    
-    model.eval()
-    test_loss = 0.0
-    test_mae = 0.0
-    test_samples = 0
-    
-    all_predictions = []
-    all_targets = []
-    
-    with torch.no_grad():
-        for mains_batch, appliance_batch in test_loader:
-            mains_batch = mains_batch.to(device)
-            appliance_batch = appliance_batch.to(device)
-            
-            outputs = model(mains_batch)
-            loss = nn.MSELoss()(outputs, appliance_batch)
-            
-            test_loss += loss.item() * mains_batch.size(0)
-            mae = torch.mean(torch.abs(outputs - appliance_batch)).item()
-            test_mae += mae * mains_batch.size(0)
-            test_samples += mains_batch.size(0)
-            
-            # Store predictions and targets for further analysis
-            all_predictions.append(outputs.cpu().numpy())
-            all_targets.append(appliance_batch.cpu().numpy())
-    
-    # Calculate final metrics
-    avg_test_loss = test_loss / test_samples
-    avg_test_mae = test_mae / test_samples
-    
-    print(f"Test Loss (MSE): {avg_test_loss:.6f}")
-    print(f"Test MAE: {avg_test_mae:.6f}")
-    
-    # Calculate additional metrics
-    all_predictions = np.concatenate(all_predictions, axis=0)
-    all_targets = np.concatenate(all_targets, axis=0)
-    
-    # RMSE
-    rmse = np.sqrt(np.mean((all_predictions - all_targets) ** 2))
-    print(f"Test RMSE: {rmse:.6f}")
-    
-    # R² Score
-    ss_res = np.sum((all_targets - all_predictions) ** 2)
-    ss_tot = np.sum((all_targets - np.mean(all_targets)) ** 2)
-    r2_score = 1 - (ss_res / ss_tot)
-    print(f"Test R² Score: {r2_score:.6f}")
-    
-    evaluation_metrics = {
-        'mse': avg_test_loss,
-        'mae': avg_test_mae,
-        'rmse': rmse,
-        'r2_score': r2_score
-    }
-    
-    return evaluation_metrics
-
-
 if __name__ == "__main__":
-    # Configuration
-    DATASET_PATH = r"C:\Users\Raymond Tie\Desktop\NILM\datasets\ukdale.h5"
-    TARGET_APPLIANCE = "washer dryer"  # Change this to your target appliance
-    WINDOW_SIZE = 99
-    BATCH_SIZE = 32
-    EPOCHS = 20
-    MODEL_SAVE_PATH = r"C:\Users\Raymond Tie\Desktop\NILM\best_nilm_model.pth"
-    
-    # Set device
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}")
+    # Create NILM CNN model
+    model = NILMCNN(window_size=99)
     
     # Load NILM data
-    train_loader, val_loader, test_loader, data_stats = load_nilm_data(
-        dataset_path=DATASET_PATH,
-        target_appliance=TARGET_APPLIANCE,
-        window_size=WINDOW_SIZE,
-        batch_size=BATCH_SIZE
-    )
+    train_dataloader, val_dataloader = load_nilm_data()
     
-    # Create NILM model
-    print(f"\nCreating NILM CNN model for {TARGET_APPLIANCE}...")
-    model = NILM_CNN_Simple(window_size=WINDOW_SIZE)
+    # Train model
+    train_process = train_model_process(model, train_dataloader, val_dataloader, epochs=10)
     
-    # Print model info
-    total_params = sum(p.numel() for p in model.parameters())
-    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"Model parameters: {total_params:,} total, {trainable_params:,} trainable")
-    
-    # Train the model
-    training_history = train_nilm_model(
-        model=model,
-        train_loader=train_loader,
-        val_loader=val_loader,
-        epochs=EPOCHS,
-        device=device,
-        model_save_path=MODEL_SAVE_PATH
-    )
-    
-    # Plot training history
-    plot_training_history(training_history)
-    
-    # Evaluate the model
-    evaluation_metrics = evaluate_model(
-        model=model,
-        test_loader=test_loader,
-        device=device,
-        data_stats=data_stats
-    )
-    
-    # Save training history
-    history_df = pd.DataFrame(training_history)
-    history_df.to_csv("training_history.csv", index=False)
-    print(f"\nTraining history saved to training_history.csv")
-    
-    print("\n" + "="*60)
-    print("TRAINING COMPLETED SUCCESSFULLY!")
-    print("="*60)
-    print(f"Best model saved to: {MODEL_SAVE_PATH}")
-    print(f"Final test metrics:")
-    for metric, value in evaluation_metrics.items():
-        print(f"  {metric.upper()}: {value:.6f}")
+    # Plot results
+    matplot_loss(train_process)
 
 
 
