@@ -9,11 +9,11 @@ import copy
 import time
 import pandas as pd
 from cnn_model import NILMCNN
-from preprocessing import NILMPreprocessor
+from preprocessing import NILMPreprocessor, TARGET_APPLIANCES
 from sklearn.metrics import mean_squared_error, mean_absolute_error, f1_score, recall_score, precision_score, matthews_corrcoef
 
 # Standard NILM metrics (from toolkit)
-on_threshold = {'washer dryer': 20, 'fridge': 50, 'kettle': 2000, 'dish washer': 20, 'washing machine': 20, 'drill': 10}
+on_threshold = {'washer dryer': 20, 'fridge': 50, 'kettle': 2000, 'dish washer': 20, 'washing machine': 20, 'drill': 10, 'light': 5}
 
 def mae(app_name, app_gt, app_pred):
     """Mean Absolute Error"""
@@ -117,7 +117,8 @@ class NILMDataset(Dataset):
 def load_nilm_data():
     # Load preprocessed data
     DATASET_PATH = r"C:\Users\Raymond Tie\Desktop\NILM\datasets\ukdale.h5"
-    TARGET_APPLIANCES = ['washer dryer']
+    # Use TARGET_APPLIANCES from preprocessing.py configuration
+    # TARGET_APPLIANCES is imported from preprocessing.py
     
     preprocessor = NILMPreprocessor(DATASET_PATH)
     train_start, train_end, test_start, test_end = preprocessor.set_time_windows()
@@ -130,17 +131,19 @@ def load_nilm_data():
     processed_data = preprocessor.create_windows_and_normalize(window_size=99, stride=1)
     
     # Create datasets
-    train_dataset = NILMDataset(processed_data['X_train'], processed_data['y_train']['washer dryer'])
-    val_dataset = NILMDataset(processed_data['X_val'], processed_data['y_val']['washer dryer'])
+    # Use the first target appliance (since we're training one appliance at a time)
+    target_appliance = TARGET_APPLIANCES[0]
+    train_dataset = NILMDataset(processed_data['X_train'], processed_data['y_train'][target_appliance])
+    val_dataset = NILMDataset(processed_data['X_val'], processed_data['y_val'][target_appliance])
     
     # Create dataloaders
     train_dataloader = DataLoader(train_dataset, batch_size=512, shuffle=True)
     val_dataloader = DataLoader(val_dataset, batch_size=512, shuffle=False)
     
-    return train_dataloader, val_dataloader
+    return train_dataloader, val_dataloader, target_appliance
 
 
-def train_model_process(model, train_dataloader, val_dataloader, epochs):
+def train_model_process(model, train_dataloader, val_dataloader, epochs, target_appliance):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
 
@@ -188,8 +191,8 @@ def train_model_process(model, train_dataloader, val_dataloader, epochs):
             
             # Calculate NILM metrics for this batch (detach from computation graph)
             with torch.no_grad():
-                batch_mae = mae('washer dryer', b_y.detach().cpu().numpy().flatten(), output.detach().cpu().numpy().flatten())
-                batch_rmse = rmse('washer dryer', b_y.detach().cpu().numpy().flatten(), output.detach().cpu().numpy().flatten())
+                batch_mae = mae(target_appliance, b_y.detach().cpu().numpy().flatten(), output.detach().cpu().numpy().flatten())
+                batch_rmse = rmse(target_appliance, b_y.detach().cpu().numpy().flatten(), output.detach().cpu().numpy().flatten())
                 train_mae += batch_mae * b_x.size(0)
                 train_rmse += batch_rmse * b_x.size(0)
             
@@ -222,13 +225,13 @@ def train_model_process(model, train_dataloader, val_dataloader, epochs):
                 val_num += b_x.size(0)
                 
                 # Calculate NILM metrics for this batch
-                batch_mae = mae('washer dryer', b_y.cpu().numpy().flatten(), output.cpu().numpy().flatten())
-                batch_rmse = rmse('washer dryer', b_y.cpu().numpy().flatten(), output.cpu().numpy().flatten())
-                batch_f1 = f1score('washer dryer', b_y.cpu().numpy().flatten(), output.cpu().numpy().flatten())
-                batch_omae = omae('washer dryer', b_y.cpu().numpy().flatten(), output.cpu().numpy().flatten())
-                batch_nde = nde('washer dryer', b_y.cpu().numpy().flatten(), output.cpu().numpy().flatten())
-                batch_energy_acc = energy_accuracy('washer dryer', b_y.cpu().numpy().flatten(), output.cpu().numpy().flatten())
-                batch_disagg_acc = disaggregation_accuracy('washer dryer', b_y.cpu().numpy().flatten(), output.cpu().numpy().flatten())
+                batch_mae = mae(target_appliance, b_y.cpu().numpy().flatten(), output.cpu().numpy().flatten())
+                batch_rmse = rmse(target_appliance, b_y.cpu().numpy().flatten(), output.cpu().numpy().flatten())
+                batch_f1 = f1score(target_appliance, b_y.cpu().numpy().flatten(), output.cpu().numpy().flatten())
+                batch_omae = omae(target_appliance, b_y.cpu().numpy().flatten(), output.cpu().numpy().flatten())
+                batch_nde = nde(target_appliance, b_y.cpu().numpy().flatten(), output.cpu().numpy().flatten())
+                batch_energy_acc = energy_accuracy(target_appliance, b_y.cpu().numpy().flatten(), output.cpu().numpy().flatten())
+                batch_disagg_acc = disaggregation_accuracy(target_appliance, b_y.cpu().numpy().flatten(), output.cpu().numpy().flatten())
                 
                 val_mae += batch_mae * b_x.size(0)
                 val_rmse += batch_rmse * b_x.size(0)
@@ -321,11 +324,11 @@ if __name__ == "__main__":
     model = NILMCNN(window_size=99)
     
     # Load NILM data
-    train_dataloader, val_dataloader = load_nilm_data()
+    train_dataloader, val_dataloader, target_appliance = load_nilm_data()
     
     # Train model
     print("Starting training...")
-    train_process = train_model_process(model, train_dataloader, val_dataloader, epochs=40)
+    train_process = train_model_process(model, train_dataloader, val_dataloader, epochs=40, target_appliance=target_appliance)
     print("Training completed!")
     
     # Plot results

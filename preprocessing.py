@@ -28,7 +28,7 @@ TARGET_APPLIANCES = ['light']  # Change this to your target appliances
 # Time Window Configuration
 USE_ALL_DATA = True  # If True, use all available data; if False, use limited time range
 TRAIN_START_DATE = "2013-03-17"  # Start of UK-DALE Building 1 data
-TRAIN_END_DATE = "2015-01-05"    # End of UK-DALE Building 1 data (estimated)
+TRAIN_END_DATE = "2013-04-05"    # End of UK-DALE Building 1 data (estimated)
 
 # Sliding Window Configuration
 WINDOW_SIZE = 99  # Size of sliding window (standard: 99 time points ≈ 10 minutes)
