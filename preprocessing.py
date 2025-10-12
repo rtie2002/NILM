@@ -12,12 +12,64 @@ Key Points:
 5. Feed Total Power: Mains power (input) → Appliance power (output)
 """
 
+# ============================================================================
+# CONFIGURATION VARIABLES - ALL CONTROL SETTINGS AT THE TOP
+# ============================================================================
+
+# Dataset Configuration
+DATASET_PATH = r"C:\Users\Raymond Tie\Desktop\NILM\datasets\ukdale.h5"
+BUILDING_ID = 1
+SAMPLE_PERIOD = 6  # seconds
+
+# Target Appliances (list of appliances to disaggregate)
+TARGET_APPLIANCES = ['light']  # Change this to your target appliances
+# Available appliances in UK-DALE: ['kettle', 'microwave', 'dishwasher', 'washing machine', 'washer dryer', 'light', 'fridge', 'freezer', 'tumble dryer']
+
+# Time Window Configuration
+USE_ALL_DATA = True  # If True, use all available data; if False, use limited time range
+TRAIN_START_DATE = "2013-03-17"  # Start of UK-DALE Building 1 data
+TRAIN_END_DATE = "2015-01-05"    # End of UK-DALE Building 1 data (estimated)
+
+# Sliding Window Configuration
+WINDOW_SIZE = 99  # Size of sliding window (standard: 99 time points ≈ 10 minutes)
+STRIDE = 1        # Stride for sliding window (1 = overlapping windows)
+
+# Data Split Configuration
+TRAIN_SPLIT_RATIO = 0.8   # 80% for training
+VAL_SPLIT_RATIO = 0.2     # 20% for validation
+RANDOM_SEED = 42          # For reproducible results
+
+# Data Quality Configuration
+MIN_SAMPLES_PER_DAY_RATIO = 0.5  # Minimum samples per day (50% of expected)
+EXPECTED_SAMPLES_PER_DAY = 14400  # 24 * 60 * 60 // 6 (6-second sampling)
+MAINS_POWER_MAX = 20000  # Maximum mains power in watts
+APPLIANCE_POWER_MAX = 4000  # Maximum appliance power in watts
+
+# File Configuration
+OUTPUT_FILENAME = 'preprocessed_data.pkl'
+SAVE_PROCESSED_DATA = True
+LOAD_PROCESSED_DATA = False  # Set to True to load existing processed data
+
+# Visualization Configuration
+VISUALIZE_DATA = True
+MAX_SAMPLES_TO_PLOT = 1000  # Maximum samples to show in plots
+SHOW_PLOTS = True
+
+# Debug Configuration
+VERBOSE = True  # Print detailed progress information
+CHECK_DATA_RANGE_SAMPLE_DAYS = 1  # Days to sample for data range checking
+
+# ============================================================================
+# IMPORT LIBRARIES
+# ============================================================================
+
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.model_selection import train_test_split
 import warnings
 import pickle
+import os
 from nilmtk import DataSet
 
 warnings.filterwarnings('ignore')
@@ -27,22 +79,23 @@ class NILMPreprocessor:
     NILM Data Preprocessor following standard toolkit methods
     """
     
-    def __init__(self, dataset_path, building_id=1, sample_period=6):
+    def __init__(self, dataset_path=None, building_id=None, sample_period=None):
         """
         Initialize the preprocessor
         
         Args:
-            dataset_path (str): Path to the HDF5 dataset file
-            building_id (int): Building ID to use (default: 1)
-            sample_period (int): Sampling period in seconds (default: 6)
+            dataset_path (str): Path to the HDF5 dataset file (uses global config if None)
+            building_id (int): Building ID to use (uses global config if None)
+            sample_period (int): Sampling period in seconds (uses global config if None)
         """
-        self.dataset_path = dataset_path
-        self.building_id = building_id
-        self.sample_period = sample_period
+        # Use global configuration variables if not provided
+        self.dataset_path = dataset_path if dataset_path is not None else DATASET_PATH
+        self.building_id = building_id if building_id is not None else BUILDING_ID
+        self.sample_period = sample_period if sample_period is not None else SAMPLE_PERIOD
         
         # Load dataset
-        self.dataset = DataSet(dataset_path)
-        self.building = self.dataset.buildings[building_id]
+        self.dataset = DataSet(self.dataset_path)
+        self.building = self.dataset.buildings[self.building_id]
         self.elec = self.building.elec
         
         print(f"Dataset loaded successfully!")
@@ -54,17 +107,21 @@ class NILMPreprocessor:
         self.train_appliances = {}
         self.test_appliances = {}
         
-    def check_data_range(self, sample_days=1):
+    def check_data_range(self, sample_days=None):
         """
         Check available data range using a small sample to avoid memory issues
         
         Args:
-            sample_days (int): Number of days to sample for checking range
+            sample_days (int): Number of days to sample for checking range (uses global config if None)
         """
-        print("Checking available data range (memory-safe method)...")
+        if sample_days is None:
+            sample_days = CHECK_DATA_RANGE_SAMPLE_DAYS
+            
+        if VERBOSE:
+            print("Checking available data range (memory-safe method)...")
         
         # Use a small time window to check data range without loading everything
-        start_date = '2013-03-17'
+        start_date = TRAIN_START_DATE
         end_date = pd.Timestamp(start_date) + pd.Timedelta(days=sample_days)
         end_date = end_date.strftime('%Y-%m-%d')
         
@@ -87,17 +144,20 @@ class NILMPreprocessor:
             
         return data_start, data_end
     
-    def set_time_windows(self, use_all_data=True):
+    def set_time_windows(self, use_all_data=None):
         """
         Set time windows for training and testing using ALL available data
         
         Args:
-            use_all_data (bool): If True, use all available data in the dataset
+            use_all_data (bool): If True, use all available data in the dataset (uses global config if None)
         """
+        if use_all_data is None:
+            use_all_data = USE_ALL_DATA
+            
         if use_all_data:
             # Use ALL available data in the dataset
-            train_start = "2013-03-17"  # Start of UK-DALE Building 1 data
-            train_end = "2015-01-05"    # End of UK-DALE Building 1 data (estimated)
+            train_start = TRAIN_START_DATE
+            train_end = TRAIN_END_DATE
             
             print(f"\nUsing ALL available data with RANDOM day-based splitting:")
             print(f"Total data range: {train_start} to {train_end} (ALL data will be loaded)")
@@ -109,7 +169,7 @@ class NILMPreprocessor:
             return train_start, train_end, train_start, train_end
         else:
             # Fallback to 2 years if needed
-            train_start = "2013-03-17"
+            train_start = TRAIN_START_DATE
             train_end = pd.Timestamp(train_start) + pd.Timedelta(days=24 * 30)
             train_end = train_end.strftime('%Y-%m-%d')
             
@@ -123,19 +183,23 @@ class NILMPreprocessor:
             
             return train_start, train_end, test_start, test_end
     
-    def create_sliding_windows(self, mains_data, appliance_data, window_size=99, stride=1):
+    def create_sliding_windows(self, mains_data, appliance_data, window_size=None, stride=None):
         """
         Create sliding windows for deep learning models
         
         Args:
             mains_data (pd.Series): Mains power data
             appliance_data (dict): Dictionary of appliance power data
-            window_size (int): Size of sliding window
-            stride (int): Stride for sliding window
+            window_size (int): Size of sliding window (uses global config if None)
+            stride (int): Stride for sliding window (uses global config if None)
             
         Returns:
             tuple: (mains_windows, appliance_windows)
         """
+        if window_size is None:
+            window_size = WINDOW_SIZE
+        if stride is None:
+            stride = STRIDE
         # Convert to numpy arrays
         mains_array = mains_data.values
         
@@ -265,8 +329,8 @@ class NILMPreprocessor:
                 # 3. FIX impossible values (appliance > mains) by capping at mains level
                 
                 # Apply reasonable power thresholds (based on UK-DALE metadata)
-                mains_power = mains_power.clip(upper=20000)  # 20kW max (UK-DALE standard)
-                app_power = app_power.clip(upper=4000)       # 4kW max per appliance
+                mains_power = mains_power.clip(upper=MAINS_POWER_MAX)  # Max mains power
+                app_power = app_power.clip(upper=APPLIANCE_POWER_MAX)  # Max appliance power
                 
                 # FINAL CHECK: Ensure appliance power never exceeds mains power
                 # This fixes the data quality issue you observed in the graphs
@@ -363,17 +427,21 @@ class NILMPreprocessor:
         
         return self.test_mains, self.test_appliances
     
-    def create_windows_and_normalize(self, window_size=99, stride=1):
+    def create_windows_and_normalize(self, window_size=None, stride=None):
         """
         Create sliding windows and normalize data
         
         Args:
-            window_size (int): Size of sliding window
-            stride (int): Stride for sliding window
+            window_size (int): Size of sliding window (uses global config if None)
+            stride (int): Stride for sliding window (uses global config if None)
             
         Returns:
             dict: Dictionary containing all processed data
         """
+        if window_size is None:
+            window_size = WINDOW_SIZE
+        if stride is None:
+            stride = STRIDE
         print("\n" + "="*50)
         print("CREATING SLIDING WINDOWS AND NORMALIZING")
         print("="*50)
@@ -400,17 +468,16 @@ class NILMPreprocessor:
             print(f"Created {len(day_chunks)} REAL day chunks from {len(original_timestamps)} samples")
             
             # Filter out days with too little data
-            expected_samples_per_day = 24 * 60 * 60 // 6  # 14400
-            min_samples = expected_samples_per_day * 0.5
+            min_samples = EXPECTED_SAMPLES_PER_DAY * MIN_SAMPLES_PER_DAY_RATIO
             filtered_day_chunks = [chunk for chunk in day_chunks if len(chunk) >= min_samples]
             print(f"After filtering: {len(filtered_day_chunks)} days with sufficient data")
             
             # Randomize day chunk order
-            np.random.seed(42)
+            np.random.seed(RANDOM_SEED)
             np.random.shuffle(filtered_day_chunks)
             
             # Split day chunks: 80% for training, 20% for validation
-            train_chunks = int(0.8 * len(filtered_day_chunks))
+            train_chunks = int(TRAIN_SPLIT_RATIO * len(filtered_day_chunks))
             train_day_chunks = filtered_day_chunks[:train_chunks]
             val_day_chunks = filtered_day_chunks[train_chunks:]
             
@@ -527,19 +594,18 @@ class NILMPreprocessor:
         print(f"Average chunk size: {np.mean([len(chunk) for chunk in day_chunks]):.0f} samples")
         print(f"Date range: {min(day_groups.keys())} to {max(day_groups.keys())}")
         
-        # Filter out days with too little data (less than 50% of expected)
-        expected_samples_per_day = 24 * 60 * 60 // 6  # 14400
-        min_samples = expected_samples_per_day * 0.5  # At least 50% of a day
+        # Filter out days with too little data (less than configured ratio of expected)
+        min_samples = EXPECTED_SAMPLES_PER_DAY * MIN_SAMPLES_PER_DAY_RATIO
         
         filtered_day_chunks = [chunk for chunk in day_chunks if len(chunk) >= min_samples]
         print(f"After filtering: {len(filtered_day_chunks)} days with sufficient data")
         
         # Randomize day chunk order
-        np.random.seed(42)  # For reproducibility
+        np.random.seed(RANDOM_SEED)  # For reproducibility
         np.random.shuffle(filtered_day_chunks)
         
-        # Split day chunks: 80% for training, 20% for validation
-        train_chunks = int(0.8 * len(filtered_day_chunks))
+        # Split day chunks: configured ratio for training and validation
+        train_chunks = int(TRAIN_SPLIT_RATIO * len(filtered_day_chunks))
         train_day_chunks = filtered_day_chunks[:train_chunks]
         val_day_chunks = filtered_day_chunks[train_chunks:]
         
@@ -634,13 +700,15 @@ class NILMPreprocessor:
         
         return processed_data
     
-    def visualize_data(self, max_samples=1000):
+    def visualize_data(self, max_samples=None):
         """
         Visualize the loaded data
         
         Args:
-            max_samples (int): Maximum number of samples to plot
+            max_samples (int): Maximum number of samples to plot (uses global config if None)
         """
+        if max_samples is None:
+            max_samples = MAX_SAMPLES_TO_PLOT
         if self.train_mains is None or self.test_mains is None:
             print("No data loaded yet. Please load training and testing data first.")
             return
@@ -723,7 +791,8 @@ Appliance Statistics:
                 bbox=dict(boxstyle='round', facecolor='lightgray', alpha=0.8))
         
         plt.tight_layout()
-        plt.show()
+        if SHOW_PLOTS:
+            plt.show()
         
         # Print summary statistics
         print("="*60)
@@ -739,14 +808,16 @@ Appliance Statistics:
         print(f"\n✓ All data arrays have same length: {len(self.train_mains) == len(list(self.train_appliances.values())[0])}")
         print("✓ Data is ready for sliding window creation!")
     
-    def save_processed_data(self, processed_data, filename='preprocessed_data.pkl'):
+    def save_processed_data(self, processed_data, filename=None):
         """
         Save processed data to file
         
         Args:
             processed_data (dict): Processed data dictionary
-            filename (str): Output filename
+            filename (str): Output filename (uses global config if None)
         """
+        if filename is None:
+            filename = OUTPUT_FILENAME
         print(f"\nSaving processed data to {filename}...")
         
         with open(filename, 'wb') as f:
@@ -755,16 +826,18 @@ Appliance Statistics:
         print(f"✓ Data saved successfully!")
         print(f"✓ File size: {os.path.getsize(filename) / (1024*1024):.1f} MB")
     
-    def load_processed_data(self, filename='preprocessed_data.pkl'):
+    def load_processed_data(self, filename=None):
         """
         Load processed data from file
         
         Args:
-            filename (str): Input filename
+            filename (str): Input filename (uses global config if None)
             
         Returns:
             dict: Processed data dictionary
         """
+        if filename is None:
+            filename = OUTPUT_FILENAME
         print(f"Loading processed data from {filename}...")
         
         with open(filename, 'rb') as f:
@@ -777,15 +850,35 @@ Appliance Statistics:
 def main():
     """
     Main function demonstrating the preprocessing pipeline
+    Uses all configuration variables defined at the top of the file
     """
-    # Configuration
-    DATASET_PATH = r"C:\Users\Raymond Tie\Desktop\NILM\datasets\ukdale.h5"
-    TARGET_APPLIANCES = ['washer dryer']  # Change to your target appliance
-    WINDOW_SIZE = 99  # Standard window size
-    STRIDE = 1  # Overlapping windows
+    print("="*60)
+    print("NILM DATA PREPROCESSING PIPELINE")
+    print("="*60)
+    print(f"Dataset: {DATASET_PATH}")
+    print(f"Building ID: {BUILDING_ID}")
+    print(f"Target Appliances: {TARGET_APPLIANCES}")
+    print(f"Window Size: {WINDOW_SIZE}")
+    print(f"Stride: {STRIDE}")
+    print(f"Use All Data: {USE_ALL_DATA}")
+    print(f"Random Seed: {RANDOM_SEED}")
+    print("="*60)
     
-    # Initialize preprocessor
-    preprocessor = NILMPreprocessor(DATASET_PATH)
+    # Check if we should load existing processed data
+    if LOAD_PROCESSED_DATA:
+        try:
+            preprocessor = NILMPreprocessor()
+            processed_data = preprocessor.load_processed_data()
+            print("\n✓ Loaded existing processed data!")
+            print(f"Training samples: {processed_data['stats']['train_samples']:,}")
+            print(f"Validation samples: {processed_data['stats']['val_samples']:,}")
+            print(f"Testing samples: {processed_data['stats']['test_samples']:,}")
+            return processed_data
+        except FileNotFoundError:
+            print(f"⚠️  Processed data file not found. Starting fresh preprocessing...")
+    
+    # Initialize preprocessor (uses global configuration)
+    preprocessor = NILMPreprocessor()
     
     # Check data range
     preprocessor.check_data_range()
@@ -799,14 +892,16 @@ def main():
     # Load testing data
     preprocessor.load_testing_data(test_start, test_end, TARGET_APPLIANCES)
     
-    # Visualize data
-    preprocessor.visualize_data()
+    # Visualize data (if enabled)
+    if VISUALIZE_DATA:
+        preprocessor.visualize_data()
     
-    # Create windows and normalize
-    processed_data = preprocessor.create_windows_and_normalize(WINDOW_SIZE, STRIDE)
+    # Create windows and normalize (uses global configuration)
+    processed_data = preprocessor.create_windows_and_normalize()
     
-    # Save processed data
-    preprocessor.save_processed_data(processed_data)
+    # Save processed data (if enabled)
+    if SAVE_PROCESSED_DATA:
+        preprocessor.save_processed_data(processed_data)
     
     print("\n" + "="*60)
     print("PREPROCESSING COMPLETE!")
@@ -815,6 +910,8 @@ def main():
     print(f"Training samples: {processed_data['stats']['train_samples']:,}")
     print(f"Validation samples: {processed_data['stats']['val_samples']:,}")
     print(f"Testing samples: {processed_data['stats']['test_samples']:,}")
+    
+    return processed_data
 
 
 if __name__ == "__main__":
