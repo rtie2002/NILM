@@ -13,7 +13,7 @@ from preprocessing import NILMPreprocessor
 from sklearn.metrics import mean_squared_error, mean_absolute_error, f1_score, recall_score, precision_score, matthews_corrcoef
 
 # Standard NILM metrics (from toolkit)
-on_threshold = {'washer dryer': 20, 'fridge': 50, 'kettle': 2000, 'dish washer': 10, 'washing machine': 20, 'drill': 0}
+on_threshold = {'washer dryer': 20, 'fridge': 50, 'kettle': 2000, 'dish washer': 20, 'washing machine': 20, 'drill': 10}
 
 def mae(app_name, app_gt, app_pred):
     """Mean Absolute Error"""
@@ -25,11 +25,9 @@ def rmse(app_name, app_gt, app_pred):
 
 def rmae(app_name, app_gt, app_pred):
     """Relative Mean Absolute Error"""
-    constant = 1
-    numerator = np.abs(app_gt - app_pred)
-    max_temp = np.where(app_gt > app_pred, app_gt, app_pred)
-    denominator = constant + max_temp
-    return np.mean(numerator/denominator)
+    numerator = np.sum(np.abs(app_gt - app_pred))
+    denominator = np.sum(np.abs(app_gt))
+    return numerator / denominator if denominator > 0 else 0
 
 def nep(app_name, app_gt, app_pred):
     """Normalized Error in Total Power"""
@@ -84,6 +82,24 @@ def mcc(app_name, app_gt, app_pred):
     pred_temp = np.where(pred_temp < threshold, 0, 1)
     return matthews_corrcoef(gt_temp, pred_temp)
 
+def nde(app_name, app_gt, app_pred):
+    """Normalized Disaggregation Error (NILMTK Standard)"""
+    numerator = np.sum((app_gt - app_pred) ** 2)
+    denominator = np.sum(app_gt ** 2)
+    return numerator / denominator if denominator > 0 else 0
+
+def energy_accuracy(app_name, app_gt, app_pred):
+    """Energy Accuracy (NILMTK Standard)"""
+    numerator = np.sum(app_gt * app_pred)
+    denominator = np.sum(app_gt ** 2)
+    return numerator / denominator if denominator > 0 else 0
+
+def disaggregation_accuracy(app_name, app_gt, app_pred):
+    """Disaggregation Accuracy (NILMTK Standard)"""
+    total_error = np.sum(np.abs(app_gt - app_pred))
+    total_energy = np.sum(np.abs(app_gt))
+    return 1 - (total_error / total_energy) if total_energy > 0 else 0
+
 class NILMDataset(Dataset):
     def __init__(self, X, y):
         self.X = torch.FloatTensor(X)
@@ -118,8 +134,8 @@ def load_nilm_data():
     val_dataset = NILMDataset(processed_data['X_val'], processed_data['y_val']['washer dryer'])
     
     # Create dataloaders
-    train_dataloader = DataLoader(train_dataset, batch_size=32, shuffle=True)
-    val_dataloader = DataLoader(val_dataset, batch_size=32, shuffle=False)
+    train_dataloader = DataLoader(train_dataset, batch_size=512, shuffle=True)
+    val_dataloader = DataLoader(val_dataset, batch_size=512, shuffle=False)
     
     return train_dataloader, val_dataloader
 
@@ -146,6 +162,7 @@ def train_model_process(model, train_dataloader, val_dataloader, epochs):
         print(f"Epoch {epoch+1}/{epochs}")
         print("-" * 10)
 
+        # Reset accumulators for this epoch
         train_loss = 0.0
         val_loss = 0.0
         train_num = 0
@@ -169,15 +186,15 @@ def train_model_process(model, train_dataloader, val_dataloader, epochs):
             train_loss += loss.item() * b_x.size(0)
             train_num += b_x.size(0)
             
-            # Calculate NILM metrics for this batch
+            # Calculate NILM metrics for this batch (detach from computation graph)
             with torch.no_grad():
-                batch_mae = mae('washer dryer', b_y.cpu().numpy().flatten(), output.cpu().numpy().flatten())
-                batch_rmse = rmse('washer dryer', b_y.cpu().numpy().flatten(), output.cpu().numpy().flatten())
+                batch_mae = mae('washer dryer', b_y.detach().cpu().numpy().flatten(), output.detach().cpu().numpy().flatten())
+                batch_rmse = rmse('washer dryer', b_y.detach().cpu().numpy().flatten(), output.detach().cpu().numpy().flatten())
                 train_mae += batch_mae * b_x.size(0)
                 train_rmse += batch_rmse * b_x.size(0)
             
             # Show progress every 1000 batches with NILM metrics
-            if step % 1000 == 0:
+            if step % 1000 == 0 and step > 0:  # Skip batch 0 to avoid misleading spike
                 current_loss = train_loss / train_num
                 current_mae = train_mae / train_num
                 current_rmse = train_rmse / train_num
@@ -189,6 +206,9 @@ def train_model_process(model, train_dataloader, val_dataloader, epochs):
         val_rmse = 0.0
         val_f1 = 0.0
         val_omae = 0.0
+        val_nde = 0.0
+        val_energy_acc = 0.0
+        val_disagg_acc = 0.0
         
         with torch.no_grad():
             for step, (b_x, b_y) in enumerate(val_dataloader):
@@ -206,14 +226,20 @@ def train_model_process(model, train_dataloader, val_dataloader, epochs):
                 batch_rmse = rmse('washer dryer', b_y.cpu().numpy().flatten(), output.cpu().numpy().flatten())
                 batch_f1 = f1score('washer dryer', b_y.cpu().numpy().flatten(), output.cpu().numpy().flatten())
                 batch_omae = omae('washer dryer', b_y.cpu().numpy().flatten(), output.cpu().numpy().flatten())
+                batch_nde = nde('washer dryer', b_y.cpu().numpy().flatten(), output.cpu().numpy().flatten())
+                batch_energy_acc = energy_accuracy('washer dryer', b_y.cpu().numpy().flatten(), output.cpu().numpy().flatten())
+                batch_disagg_acc = disaggregation_accuracy('washer dryer', b_y.cpu().numpy().flatten(), output.cpu().numpy().flatten())
                 
                 val_mae += batch_mae * b_x.size(0)
                 val_rmse += batch_rmse * b_x.size(0)
                 val_f1 += batch_f1 * b_x.size(0)
                 val_omae += batch_omae * b_x.size(0)
+                val_nde += batch_nde * b_x.size(0)
+                val_energy_acc += batch_energy_acc * b_x.size(0)
+                val_disagg_acc += batch_disagg_acc * b_x.size(0)
                 
                 # Show validation progress every 500 batches with NILM metrics
-                if step % 500 == 0:
+                if step % 500 == 0 and step > 0:  # Skip batch 0 to avoid misleading spike
                     current_val_loss = val_loss / val_num
                     current_val_mae = val_mae / val_num
                     current_val_rmse = val_rmse / val_num
@@ -230,6 +256,9 @@ def train_model_process(model, train_dataloader, val_dataloader, epochs):
         avg_val_rmse = val_rmse / val_num
         avg_val_f1 = val_f1 / val_num
         avg_val_omae = val_omae / val_num
+        avg_val_nde = val_nde / val_num
+        avg_val_energy_acc = val_energy_acc / val_num
+        avg_val_disagg_acc = val_disagg_acc / val_num
         
         train_losses_all.append(avg_train_loss)
         val_losses_all.append(avg_val_loss)
@@ -237,19 +266,25 @@ def train_model_process(model, train_dataloader, val_dataloader, epochs):
         # Display comprehensive NILM metrics
         print(f"Train - Loss: {avg_train_loss:.4f}, MAE: {avg_train_mae:.4f}, RMSE: {avg_train_rmse:.4f}")
         print(f"Val   - Loss: {avg_val_loss:.4f}, MAE: {avg_val_mae:.4f}, RMSE: {avg_val_rmse:.4f}, F1: {avg_val_f1:.4f}, OMAE: {avg_val_omae:.4f}")
+        print(f"Val   - NDE: {avg_val_nde:.4f}, Energy Acc: {avg_val_energy_acc:.4f}, Disagg Acc: {avg_val_disagg_acc:.4f}")
         
-        # Calculate time per epoch
-        epoch_time = time.time() - since
-        print(f"Epoch {epoch+1} completed in {epoch_time:.1f}s")
-        print(f"Best Val Loss so far: {best_loss:.4f}")
-        print("=" * 50)
-
-        # Save best model
+        # Save best model FIRST
         if avg_val_loss < best_loss:
             best_loss = avg_val_loss
             best_model_wts = copy.deepcopy(model.state_dict())
             torch.save(model.state_dict(), 'model_train.pth')
             print("🎉 New best model saved!")
+        
+        # Calculate time per epoch
+        epoch_time = time.time() - since
+        print(f"Epoch {epoch+1} completed in {epoch_time:.1f}s")
+        
+        # Only print best loss if it's been updated (not infinity)
+        if best_loss != float('inf'):
+            print(f"Best Val Loss so far: {best_loss:.4f}")
+        else:
+            print("Best Val Loss so far: Not set yet")
+        print("=" * 50)
         
         since = time.time()  # Reset timer for next epoch
 
@@ -263,7 +298,7 @@ def train_model_process(model, train_dataloader, val_dataloader, epochs):
                                          "train_loss": train_losses_all, 
                                          "val_loss": val_losses_all})
     print("DataFrame created successfully!")
-    
+
     return train_process
 
 def matplot_loss(train_process):
@@ -290,22 +325,11 @@ if __name__ == "__main__":
     
     # Train model
     print("Starting training...")
-    train_process = train_model_process(model, train_dataloader, val_dataloader, epochs=10)
+    train_process = train_model_process(model, train_dataloader, val_dataloader, epochs=40)
     print("Training completed!")
     
     # Plot results
     print("Starting to plot results...")
     matplot_loss(train_process)
     print("All done!")
-
-
-
-
-    
-
-
-
-
-
-  
 

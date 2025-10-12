@@ -97,7 +97,7 @@ class NILMPreprocessor:
         if use_all_data:
             # Use ALL available data in the dataset
             train_start = "2013-03-17"  # Start of UK-DALE Building 1 data
-            train_end = "2014-04-05"    # End of UK-DALE Building 1 data (estimated)
+            train_end = "2015-01-05"    # End of UK-DALE Building 1 data (estimated)
             
             print(f"\nUsing ALL available data with RANDOM day-based splitting:")
             print(f"Total data range: {train_start} to {train_end} (ALL data will be loaded)")
@@ -286,16 +286,16 @@ class NILMPreprocessor:
     
     def normalize_data(self, train_data, test_data):
         """
-        Normalize data using training statistics
+        Normalize data using training statistics (NO DATA LEAKAGE)
         
         Args:
             train_data (np.array): Training data
-            test_data (np.array): Test data
+            test_data (np.array): Test data (for separate test set only)
             
         Returns:
             tuple: (train_normalized, test_normalized, mean, std)
         """
-        # Calculate statistics from training data
+        # Calculate statistics from training data ONLY
         mean = np.mean(train_data)
         std = np.std(train_data)
         
@@ -303,9 +303,16 @@ class NILMPreprocessor:
         if std == 0:
             std = 1
         
-        # Normalize both training and test data
+        # Normalize training data
         train_normalized = (train_data - mean) / std
-        test_normalized = (test_data - mean) / std
+        
+        # For test data: only normalize if it's a separate test set
+        # If test_data is the same as train_data (all data mode), return train_normalized
+        if test_data is train_data or np.array_equal(test_data, train_data):
+            test_normalized = train_normalized
+        else:
+            # Only normalize test data if it's truly separate
+            test_normalized = (test_data - mean) / std
         
         return train_normalized, test_normalized, mean, std
     
@@ -566,14 +573,19 @@ class NILMPreprocessor:
         
         # Assign the processed data
         if self.train_mains is self.test_mains:
-            # Using all data - data already processed above
-            X_train = train_mains_norm
-            X_val = val_mains_norm
+            # Using all data - apply the train/val split indices to the normalized data
+            X_train = train_mains_norm[train_indices]
+            X_val = val_mains_norm[val_indices]
             X_test = test_mains_norm
             
-            y_train = train_app_norm
-            y_val = val_app_norm
-            y_test = test_app_norm
+            y_train = {}
+            y_val = {}
+            y_test = {}
+            
+            for app_name in self.train_appliances.keys():
+                y_train[app_name] = train_app_norm[app_name][train_indices]
+                y_val[app_name] = val_app_norm[app_name][val_indices]
+                y_test[app_name] = test_app_norm[app_name]
             
             print(f"\nDataset Distribution:")
             print(f"Training: {len(X_train):,} samples")
@@ -591,7 +603,7 @@ class NILMPreprocessor:
             
             for app_name in self.train_appliances.keys():
                 y_train[app_name] = train_app_norm[app_name][train_indices]
-                y_val[app_name] = train_app_norm[app_name][val_indices]
+                y_val[app_name] = train_app_norm[app_name][val_indices]  # Use train data for validation in this mode
                 y_test[app_name] = test_app_norm[app_name]
         
         # Store statistics

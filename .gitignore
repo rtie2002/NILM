@@ -18,3 +18,4 @@ datasets/
 # Toolkits
 toolkit/
 *.pkl
+*.pth
