@@ -22,13 +22,13 @@ BUILDING_ID = 1
 SAMPLE_PERIOD = 6  # seconds
 
 # Target Appliances (list of appliances to disaggregate)
-TARGET_APPLIANCES = ['light']  # Change this to your target appliances
+TARGET_APPLIANCES = ['washer dryer']  # Change this to your target appliances
 # Available appliances in UK-DALE: ['kettle', 'microwave', 'dishwasher', 'washing machine', 'washer dryer', 'light', 'fridge', 'freezer', 'tumble dryer']
 
 # Time Window Configuration
 USE_ALL_DATA = True  # If True, use all available data; if False, use limited time range
 TRAIN_START_DATE = "2013-03-17"  # Start of UK-DALE Building 1 data
-TRAIN_END_DATE = "2013-04-05"    # End of UK-DALE Building 1 data (estimated)
+TRAIN_END_DATE = "2015-01-05"    # End of UK-DALE Building 1 data (estimated)
 
 # Sliding Window Configuration
 WINDOW_SIZE = 99  # Size of sliding window (standard: 99 time points ≈ 10 minutes)
@@ -70,18 +70,20 @@ from sklearn.model_selection import train_test_split
 import warnings
 import pickle
 import os
+import torch
 from nilmtk import DataSet
 
 warnings.filterwarnings('ignore')
 
-class NILMPreprocessor:
+class NILMDataLoader:
     """
-    NILM Data Preprocessor following standard toolkit methods
+    NILM Data Loader following standard toolkit methods
+    Combines data loading, preprocessing, and windowing into a streamlined workflow
     """
     
     def __init__(self, dataset_path=None, building_id=None, sample_period=None):
         """
-        Initialize the preprocessor
+        Initialize the data loader
         
         Args:
             dataset_path (str): Path to the HDF5 dataset file (uses global config if None)
@@ -102,10 +104,9 @@ class NILMPreprocessor:
         print(f"Available appliances: {[app.metadata['type'] for app in self.elec.appliances]}")
         
         # Initialize data storage
-        self.train_mains = None
-        self.test_mains = None
-        self.train_appliances = {}
-        self.test_appliances = {}
+        self.mains_data = None
+        self.appliance_data = {}
+        self.processed_data = None
         
     def check_data_range(self, sample_days=None):
         """
@@ -183,32 +184,38 @@ class NILMPreprocessor:
             
             return train_start, train_end, test_start, test_end
     
-    def create_sliding_windows(self, mains_data, appliance_data, window_size=None, stride=None):
+    def preprocess_and_window(self, window_size=None, stride=None, normalize=True):
         """
-        Create sliding windows for deep learning models
+        Combined preprocessing method: creates sliding windows and normalizes data
+        Following toolkit standards for streamlined preprocessing
         
         Args:
-            mains_data (pd.Series): Mains power data
-            appliance_data (dict): Dictionary of appliance power data
             window_size (int): Size of sliding window (uses global config if None)
             stride (int): Stride for sliding window (uses global config if None)
+            normalize (bool): Whether to normalize the data
             
         Returns:
-            tuple: (mains_windows, appliance_windows)
+            dict: Dictionary containing all processed data
         """
         if window_size is None:
             window_size = WINDOW_SIZE
         if stride is None:
             stride = STRIDE
-        # Convert to numpy arrays
-        mains_array = mains_data.values
+            
+        print("\n" + "="*50)
+        print("PREPROCESSING AND WINDOWING DATA")
+        print("="*50)
         
-        # Create windows for mains data
+        if self.mains_data is None or not self.appliance_data:
+            raise ValueError("No data loaded. Please call load_data() first.")
+        
+        # Create sliding windows
+        mains_array = self.mains_data.values
         mains_windows = []
         appliance_windows = {}
         
         # Initialize appliance windows
-        for app_name in appliance_data.keys():
+        for app_name in self.appliance_data.keys():
             appliance_windows[app_name] = []
         
         # Create sliding windows
@@ -218,7 +225,7 @@ class NILMPreprocessor:
             mains_windows.append(mains_window)
             
             # Appliance windows
-            for app_name, app_data in appliance_data.items():
+            for app_name, app_data in self.appliance_data.items():
                 app_window = app_data.values[i:i + window_size]
                 appliance_windows[app_name].append(app_window)
         
@@ -227,7 +234,33 @@ class NILMPreprocessor:
         for app_name in appliance_windows.keys():
             appliance_windows[app_name] = np.array(appliance_windows[app_name])
         
-        return mains_windows, appliance_windows
+        # Normalize data if requested
+        if normalize:
+            # Normalize mains data
+            mains_mean = np.mean(mains_windows)
+            mains_std = np.std(mains_windows)
+            if mains_std == 0:
+                mains_std = 1
+            mains_windows = (mains_windows - mains_mean) / mains_std
+            
+            # Normalize appliance data
+            appliance_stats = {}
+            for app_name in appliance_windows.keys():
+                app_mean = np.mean(appliance_windows[app_name])
+                app_std = np.std(appliance_windows[app_name])
+                if app_std == 0:
+                    app_std = 1
+                appliance_windows[app_name] = (appliance_windows[app_name] - app_mean) / app_std
+                appliance_stats[app_name] = {'mean': app_mean, 'std': app_std}
+        else:
+            mains_mean = mains_std = 0
+            appliance_stats = {}
+        
+        # Create train/validation split using day-based splitting
+        processed_data = self._create_data_splits(mains_windows, appliance_windows, mains_mean, mains_std, appliance_stats, window_size, stride)
+        
+        self.processed_data = processed_data
+        return processed_data
     
     def load_data_period(self, start_date, end_date, appliances):
         """
@@ -348,6 +381,87 @@ class NILMPreprocessor:
         
         return mains_power, appliance_data
     
+    def _create_data_splits(self, mains_windows, appliance_windows, mains_mean, mains_std, appliance_stats, window_size, stride):
+        """
+        Create train/validation/test splits using day-based splitting (FIXED VERSION)
+        Maintains temporal continuity for realistic NILM evaluation
+        """
+        # Calculate how many windows correspond to each day
+        samples_per_day = EXPECTED_SAMPLES_PER_DAY
+        windows_per_day = (samples_per_day - window_size + 1) // stride
+        
+        # Calculate total days from window count
+        total_days = len(mains_windows) // windows_per_day
+        
+        # Create day-based indices (FIXED: map windows to days correctly)
+        train_windows = []
+        val_windows = []
+        
+        # Split days: 80% for training, 20% for validation
+        train_days = int(TRAIN_SPLIT_RATIO * total_days)
+        
+        for day in range(total_days):
+            start_window = day * windows_per_day
+            end_window = min((day + 1) * windows_per_day, len(mains_windows))
+            day_windows = list(range(start_window, end_window))
+            
+            if day < train_days:
+                train_windows.extend(day_windows)
+            else:
+                val_windows.extend(day_windows)
+        
+        # Filter out any invalid indices
+        train_windows = [w for w in train_windows if w < len(mains_windows)]
+        val_windows = [w for w in val_windows if w < len(mains_windows)]
+        
+        print(f"Total windows: {len(mains_windows):,}")
+        print(f"Total days: {total_days}")
+        print(f"Training days: {train_days}")
+        print(f"Training windows: {len(train_windows):,} samples")
+        print(f"Validation windows: {len(val_windows):,} samples")
+        
+        # Create splits
+        X_train = mains_windows[train_windows]
+        X_val = mains_windows[val_windows]
+        X_test = X_val[:len(X_val)//2]  # Use half of validation as test
+        
+        y_train = {}
+        y_val = {}
+        y_test = {}
+        
+        for app_name in appliance_windows.keys():
+            y_train[app_name] = appliance_windows[app_name][train_windows]
+            y_val[app_name] = appliance_windows[app_name][val_windows]
+            y_test[app_name] = appliance_windows[app_name][val_windows[:len(val_windows)//2]]
+        
+        # Store statistics
+        stats = {
+            'mains': {'mean': mains_mean, 'std': mains_std},
+            'appliances': appliance_stats,
+            'window_size': window_size,
+            'stride': stride,
+            'train_samples': len(X_train),
+            'val_samples': len(X_val),
+            'test_samples': len(X_test)
+        }
+        
+        processed_data = {
+            'X_train': X_train,
+            'X_val': X_val,
+            'X_test': X_test,
+            'y_train': y_train,
+            'y_val': y_val,
+            'y_test': y_test,
+            'stats': stats
+        }
+        
+        print(f"\nData processing complete!")
+        print(f"Training samples: {len(X_train):,}")
+        print(f"Validation samples: {len(X_val):,}")
+        print(f"Testing samples: {len(X_test):,}")
+        
+        return processed_data
+    
     def normalize_data(self, train_data, test_data):
         """
         Normalize data using training statistics (NO DATA LEAKAGE)
@@ -380,433 +494,144 @@ class NILMPreprocessor:
         
         return train_normalized, test_normalized, mean, std
     
-    def load_training_data(self, train_start, train_end, target_appliances):
+    def load_data(self, start_date, end_date, target_appliances, data_type="all"):
         """
-        Load training data
+        Load data for specified time period (combines training and testing data loading)
         
         Args:
-            train_start (str): Training start date
-            train_end (str): Training end date
+            start_date (str): Start date for data loading
+            end_date (str): End date for data loading
             target_appliances (list): List of target appliances
+            data_type (str): Type of data ("train", "test", or "all")
         """
         print("="*50)
-        print("LOADING TRAINING DATA")
+        print(f"LOADING {data_type.upper()} DATA")
         print("="*50)
         
-        self.train_mains, self.train_appliances = self.load_data_period(
-            train_start, train_end, target_appliances
+        self.mains_data, self.appliance_data = self.load_data_period(
+            start_date, end_date, target_appliances
         )
         
-        return self.train_mains, self.train_appliances
+        return self.mains_data, self.appliance_data
     
-    def load_testing_data(self, test_start, test_end, target_appliances):
-        """
-        Load testing data
-        
-        Args:
-            test_start (str): Testing start date
-            test_end (str): Testing end date
-            target_appliances (list): List of target appliances
-        """
-        print("\n" + "="*50)
-        print("LOADING TESTING DATA")
-        print("="*50)
-        
-        # Check if we're using all data (test_start == test_end means we're using all data)
-        if test_start == test_end:
-            print("Using ALL data - test data will be created from training data")
-            # When using all data, we don't load separate test data
-            # The test data will be created from the training data in create_windows_and_normalize
-            self.test_mains = self.train_mains  # Use same data
-            self.test_appliances = self.train_appliances  # Use same data
-        else:
-            # Original approach - load separate test data
-            self.test_mains, self.test_appliances = self.load_data_period(
-                test_start, test_end, target_appliances
-            )
-        
-        return self.test_mains, self.test_appliances
-    
-    def create_windows_and_normalize(self, window_size=None, stride=None):
-        """
-        Create sliding windows and normalize data
-        
-        Args:
-            window_size (int): Size of sliding window (uses global config if None)
-            stride (int): Stride for sliding window (uses global config if None)
-            
-        Returns:
-            dict: Dictionary containing all processed data
-        """
-        if window_size is None:
-            window_size = WINDOW_SIZE
-        if stride is None:
-            stride = STRIDE
-        print("\n" + "="*50)
-        print("CREATING SLIDING WINDOWS AND NORMALIZING")
-        print("="*50)
-        
-        # Check if we're using all data (train and test are the same)
-        if self.train_mains is self.test_mains:
-            print("Using ALL data with random day-based splitting...")
-            print("⚠️  Large dataset detected - using memory-efficient processing...")
-            
-            # For large datasets, we need to process in chunks to avoid memory issues
-            # First, let's create the day-based split indices without loading all data
-            print("Creating day-based split indices...")
-            original_timestamps = self.train_mains.index
-            
-            # Group by actual calendar days
-            day_groups = {}
-            for idx, timestamp in enumerate(original_timestamps):
-                day_key = timestamp.date()
-                if day_key not in day_groups:
-                    day_groups[day_key] = []
-                day_groups[day_key].append(idx)
-            
-            day_chunks = list(day_groups.values())
-            print(f"Created {len(day_chunks)} REAL day chunks from {len(original_timestamps)} samples")
-            
-            # Filter out days with too little data
-            min_samples = EXPECTED_SAMPLES_PER_DAY * MIN_SAMPLES_PER_DAY_RATIO
-            filtered_day_chunks = [chunk for chunk in day_chunks if len(chunk) >= min_samples]
-            print(f"After filtering: {len(filtered_day_chunks)} days with sufficient data")
-            
-            # Randomize day chunk order
-            np.random.seed(RANDOM_SEED)
-            np.random.shuffle(filtered_day_chunks)
-            
-            # Split day chunks: 80% for training, 20% for validation
-            train_chunks = int(TRAIN_SPLIT_RATIO * len(filtered_day_chunks))
-            train_day_chunks = filtered_day_chunks[:train_chunks]
-            val_day_chunks = filtered_day_chunks[train_chunks:]
-            
-            # Flatten chunk indices
-            train_indices = [idx for chunk in train_day_chunks for idx in chunk]
-            val_indices = [idx for chunk in val_day_chunks for idx in chunk]
-            
-            # Filter indices to ensure they're within bounds
-            max_index = len(self.train_mains) - 1
-            train_indices = [idx for idx in train_indices if idx <= max_index]
-            val_indices = [idx for idx in val_indices if idx <= max_index]
-            
-            print(f"Training indices: {len(train_indices):,} samples")
-            print(f"Validation indices: {len(val_indices):,} samples")
-            
-            # Now create sliding windows only for the selected indices
-            print("Creating sliding windows for selected data...")
-            train_mains_windows, train_app_windows = self.create_sliding_windows(
-                self.train_mains.iloc[train_indices], 
-                {app: self.train_appliances[app].iloc[train_indices] for app in self.train_appliances.keys()}, 
-                window_size, stride
-            )
-            
-            val_mains_windows, val_app_windows = self.create_sliding_windows(
-                self.train_mains.iloc[val_indices], 
-                {app: self.train_appliances[app].iloc[val_indices] for app in self.train_appliances.keys()}, 
-                window_size, stride
-            )
-            
-            print(f"Training windows: {train_mains_windows.shape}")
-            print(f"Validation windows: {val_mains_windows.shape}")
-            
-            # Normalize data
-            print("Normalizing data...")
-            train_mains_norm, val_mains_norm, mains_mean, mains_std = self.normalize_data(
-                train_mains_windows, val_mains_windows
-            )
-            
-            # For test data, use a subset of validation data to avoid memory issues
-            test_mains_norm = val_mains_norm[:len(val_mains_norm)//2]  # Use half of validation as test
-        else:
-            # Original approach for separate train/test data
-            print("Creating sliding windows...")
-            train_mains_windows, train_app_windows = self.create_sliding_windows(
-                self.train_mains, self.train_appliances, window_size, stride
-            )
-            
-            test_mains_windows, test_app_windows = self.create_sliding_windows(
-                self.test_mains, self.test_appliances, window_size, stride
-            )
-            
-            print(f"Training windows: {train_mains_windows.shape}")
-            print(f"Testing windows: {test_mains_windows.shape}")
-            
-            # Normalize data
-            print("Normalizing data...")
-            train_mains_norm, test_mains_norm, mains_mean, mains_std = self.normalize_data(
-                train_mains_windows, test_mains_windows
-            )
-        
-        # Handle appliance data normalization
-        if self.train_mains is self.test_mains:
-            # Using all data - normalize appliance data
-            train_app_norm = {}
-            val_app_norm = {}
-            test_app_norm = {}
-            appliance_stats = {}
-            
-            for app_name in self.train_appliances.keys():
-                train_app_norm[app_name], val_app_norm[app_name], app_mean, app_std = self.normalize_data(
-                    train_app_windows[app_name], val_app_windows[app_name]
-                )
-                appliance_stats[app_name] = {'mean': app_mean, 'std': app_std}
-                # For test data, use half of validation data
-                test_app_norm[app_name] = val_app_norm[app_name][:len(val_app_norm[app_name])//2]
-        else:
-            # Original approach for separate train/test data
-            train_app_norm = {}
-            test_app_norm = {}
-            appliance_stats = {}
-            
-            for app_name in self.train_appliances.keys():
-                train_app_norm[app_name], test_app_norm[app_name], app_mean, app_std = self.normalize_data(
-                    train_app_windows[app_name], test_app_windows[app_name]
-                )
-                appliance_stats[app_name] = {'mean': app_mean, 'std': app_std}
-        
-        # Create train/validation split (REAL DAY-BASED SPLIT USING ACTUAL TIMESTAMPS)
-        import numpy as np
-        import pandas as pd
-        
-        # Use ACTUAL timestamps to create real day boundaries
-        if self.train_mains is self.test_mains:
-            # Using all data - use the same timestamps for both
-            original_timestamps = self.train_mains.index
-            print("Using ALL data timestamps for random day-based splitting")
-        else:
-            # Original approach
-            original_timestamps = self.train_mains.index
-        
-        # Group by actual calendar days
-        day_groups = {}
-        for idx, timestamp in enumerate(original_timestamps):
-            day_key = timestamp.date()  # Get just the date part (YYYY-MM-DD)
-            if day_key not in day_groups:
-                day_groups[day_key] = []
-            day_groups[day_key].append(idx)
-        
-        # Convert to list of day chunks
-        day_chunks = list(day_groups.values())
-        
-        print(f"Created {len(day_chunks)} REAL day chunks from {len(original_timestamps)} samples")
-        print(f"Day chunk sizes: {[len(chunk) for chunk in day_chunks[:5]]}... (showing first 5)")
-        print(f"Average chunk size: {np.mean([len(chunk) for chunk in day_chunks]):.0f} samples")
-        print(f"Date range: {min(day_groups.keys())} to {max(day_groups.keys())}")
-        
-        # Filter out days with too little data (less than configured ratio of expected)
-        min_samples = EXPECTED_SAMPLES_PER_DAY * MIN_SAMPLES_PER_DAY_RATIO
-        
-        filtered_day_chunks = [chunk for chunk in day_chunks if len(chunk) >= min_samples]
-        print(f"After filtering: {len(filtered_day_chunks)} days with sufficient data")
-        
-        # Randomize day chunk order
-        np.random.seed(RANDOM_SEED)  # For reproducibility
-        np.random.shuffle(filtered_day_chunks)
-        
-        # Split day chunks: configured ratio for training and validation
-        train_chunks = int(TRAIN_SPLIT_RATIO * len(filtered_day_chunks))
-        train_day_chunks = filtered_day_chunks[:train_chunks]
-        val_day_chunks = filtered_day_chunks[train_chunks:]
-        
-        # Flatten chunk indices (no overlap, maintains continuity)
-        train_indices = [idx for chunk in train_day_chunks for idx in chunk]
-        val_indices = [idx for chunk in val_day_chunks for idx in chunk]
-        
-        # Filter indices to ensure they're within bounds of normalized data
-        max_index = len(train_mains_norm) - 1
-        train_indices = [idx for idx in train_indices if idx <= max_index]
-        val_indices = [idx for idx in val_indices if idx <= max_index]
-        
-        # Check distribution balance
-        train_samples = len(train_indices)
-        val_samples = len(val_indices)
-        total_samples = train_samples + val_samples
-        
-        print(f"\nDataset Distribution:")
-        print(f"Training: {train_samples:,} samples ({train_samples/total_samples*100:.1f}%)")
-        print(f"Validation: {val_samples:,} samples ({val_samples/total_samples*100:.1f}%)")
-        print(f"Training days: {len(train_day_chunks)}")
-        print(f"Validation days: {len(val_day_chunks)}")
-        
-        # Check if distribution is reasonable
-        if val_samples < total_samples * 0.15:  # Less than 15% validation
-            print("⚠️  WARNING: Validation set is quite small (<15%)")
-        elif val_samples > total_samples * 0.25:  # More than 25% validation
-            print("⚠️  WARNING: Validation set is quite large (>25%)")
-        else:
-            print("✅ Distribution looks good (15-25% validation)")
-        
-        # Assign the processed data
-        if self.train_mains is self.test_mains:
-            # Using all data - apply the train/val split indices to the normalized data
-            X_train = train_mains_norm[train_indices]
-            X_val = val_mains_norm[val_indices]
-            X_test = test_mains_norm
-            
-            y_train = {}
-            y_val = {}
-            y_test = {}
-            
-            for app_name in self.train_appliances.keys():
-                y_train[app_name] = train_app_norm[app_name][train_indices]
-                y_val[app_name] = val_app_norm[app_name][val_indices]
-                y_test[app_name] = test_app_norm[app_name]
-            
-            print(f"\nDataset Distribution:")
-            print(f"Training: {len(X_train):,} samples")
-            print(f"Validation: {len(X_val):,} samples")
-            print(f"Testing: {len(X_test):,} samples")
-        else:
-            # Original approach - use separate test data
-            X_train = train_mains_norm[train_indices]
-            X_val = train_mains_norm[val_indices]
-            X_test = test_mains_norm
-            
-            y_train = {}
-            y_val = {}
-            y_test = {}
-            
-            for app_name in self.train_appliances.keys():
-                y_train[app_name] = train_app_norm[app_name][train_indices]
-                y_val[app_name] = train_app_norm[app_name][val_indices]  # Use train data for validation in this mode
-                y_test[app_name] = test_app_norm[app_name]
-        
-        # Store statistics
-        stats = {
-            'mains': {'mean': mains_mean, 'std': mains_std},
-            'appliances': appliance_stats,
-            'window_size': window_size,
-            'stride': stride,
-            'train_samples': len(X_train),
-            'val_samples': len(X_val),
-            'test_samples': len(X_test)
-        }
-        
-        processed_data = {
-            'X_train': X_train,
-            'X_val': X_val,
-            'X_test': X_test,
-            'y_train': y_train,
-            'y_val': y_val,
-            'y_test': y_test,
-            'stats': stats
-        }
-        
-        print(f"\nData processing complete!")
-        print(f"Training samples: {len(X_train):,}")
-        print(f"Validation samples: {len(X_val):,}")
-        print(f"Testing samples: {len(X_test):,}")
-        
-        return processed_data
     
     def visualize_data(self, max_samples=None):
         """
-        Visualize the loaded data
+        Simplified visualization of loaded data
         
         Args:
             max_samples (int): Maximum number of samples to plot (uses global config if None)
         """
         if max_samples is None:
             max_samples = MAX_SAMPLES_TO_PLOT
-        if self.train_mains is None or self.test_mains is None:
-            print("No data loaded yet. Please load training and testing data first.")
+        if self.mains_data is None or not self.appliance_data:
+            print("No data loaded yet. Please call load_data() first.")
             return
         
-        # Create plots to visualize the data
-        fig, axes = plt.subplots(2, 2, figsize=(20, 12))
+        # Create simplified plots
+        fig, axes = plt.subplots(1, 2, figsize=(15, 6))
         
-        # Plot 1: Training Data - Total Power vs Appliance Power (WHOLE TIME RANGE)
-        ax1 = axes[0, 0]
-        ax1.plot(self.train_mains.index, self.train_mains.values, 'b-', 
-                label='Total Power (Mains)', linewidth=0.5, alpha=0.7)
-        for app_name, app_power in self.train_appliances.items():
-            ax1.plot(app_power.index, app_power.values, 'r-', 
-                    label=f'{app_name.title()} Power', linewidth=0.5, alpha=0.7)
-        ax1.set_title('Training Data: Total Power vs Appliance Power (WHOLE TIME RANGE)', fontsize=14)
-        ax1.set_xlabel('Time')
+        # Plot 1: Power vs Time
+        ax1 = axes[0]
+        sample_indices = range(0, len(self.mains_data), max(1, len(self.mains_data) // max_samples))
+        ax1.plot(sample_indices, self.mains_data.iloc[sample_indices].values, 'b-', 
+                label='Total Power (Mains)', linewidth=0.8, alpha=0.8)
+        for app_name, app_power in self.appliance_data.items():
+            ax1.plot(sample_indices, app_power.iloc[sample_indices].values, 'r-', 
+                    label=f'{app_name.title()} Power', linewidth=0.8, alpha=0.8)
+        ax1.set_title('Power Consumption Over Time', fontsize=14)
+        ax1.set_xlabel('Sample Index')
         ax1.set_ylabel('Power (W)')
         ax1.legend()
         ax1.grid(True, alpha=0.3)
         
-        # Plot 2: Testing Data - Total Power vs Appliance Power (WHOLE TIME RANGE)
-        ax2 = axes[0, 1]
-        ax2.plot(self.test_mains.index, self.test_mains.values, 'b-', 
-                label='Total Power (Mains)', linewidth=0.5, alpha=0.7)
-        for app_name, app_power in self.test_appliances.items():
-            ax2.plot(app_power.index, app_power.values, 'r-', 
-                    label=f'{app_name.title()} Power', linewidth=0.5, alpha=0.7)
-        ax2.set_title('Testing Data: Total Power vs Appliance Power (WHOLE TIME RANGE)', fontsize=14)
-        ax2.set_xlabel('Time')
-        ax2.set_ylabel('Power (W)')
+        # Plot 2: Power Distribution
+        ax2 = axes[1]
+        ax2.hist(self.mains_data.values, bins=50, alpha=0.7, 
+                label='Total Power', color='blue', density=True)
+        for app_name, app_power in self.appliance_data.items():
+            ax2.hist(app_power.values, bins=50, alpha=0.7, 
+                    label=f'{app_name.title()} Power', color='red', density=True)
+        ax2.set_title('Power Distribution', fontsize=14)
+        ax2.set_xlabel('Power (W)')
+        ax2.set_ylabel('Density')
         ax2.legend()
         ax2.grid(True, alpha=0.3)
-        
-        # Plot 3: Power Distribution Comparison
-        ax3 = axes[1, 0]
-        ax3.hist(self.train_mains.values, bins=50, alpha=0.7, 
-                label='Total Power', color='blue', density=True)
-        for app_name, app_power in self.train_appliances.items():
-            ax3.hist(app_power.values, bins=50, alpha=0.7, 
-                    label=f'{app_name.title()} Power', color='red', density=True)
-        ax3.set_title('Power Distribution Comparison (Training Data)', fontsize=14)
-        ax3.set_xlabel('Power (W)')
-        ax3.set_ylabel('Density')
-        ax3.legend()
-        ax3.grid(True, alpha=0.3)
-        
-        # Plot 4: Data Statistics Summary
-        ax4 = axes[1, 1]
-        ax4.axis('off')
-        
-        # Calculate statistics
-        stats_text = f"""
-DATA LOADING SUMMARY
-===================
-
-Training Data:
-• Total Power: {len(self.train_mains):,} samples
-• Time Period: {self.train_mains.index[0]} to {self.train_mains.index[-1]}
-• Duration: {(self.train_mains.index[-1] - self.train_mains.index[0]).days} days
-
-Testing Data:
-• Total Power: {len(self.test_mains):,} samples  
-• Time Period: {self.test_mains.index[0]} to {self.test_mains.index[-1]}
-• Duration: {(self.test_mains.index[-1] - self.test_mains.index[0]).days} days
-
-Appliance Statistics:
-"""
-        
-        for app_name, app_power in self.train_appliances.items():
-            stats_text += f"""
-• {app_name.title()}:
-  - Training: {len(app_power):,} samples
-  - Max Power: {app_power.max():.1f} W
-  - Mean Power: {app_power.mean():.1f} W
-  - Non-zero samples: {(app_power > 0).sum():,} ({(app_power > 0).mean()*100:.1f}%)
-"""
-        
-        ax4.text(0.05, 0.95, stats_text, transform=ax4.transAxes, fontsize=11, 
-                verticalalignment='top', fontfamily='monospace',
-                bbox=dict(boxstyle='round', facecolor='lightgray', alpha=0.8))
         
         plt.tight_layout()
         if SHOW_PLOTS:
             plt.show()
         
         # Print summary statistics
-        print("="*60)
-        print("DATA LOADING VERIFICATION")
-        print("="*60)
-        print(f"✓ Training data: {len(self.train_mains):,} samples ({(self.train_mains.index[-1] - self.train_mains.index[0]).days} days)")
-        print(f"✓ Testing data: {len(self.test_mains):,} samples ({(self.test_mains.index[-1] - self.test_mains.index[0]).days} days)")
-        print(f"✓ Total appliances loaded: {len(self.train_appliances)}")
+        print("="*50)
+        print("DATA SUMMARY")
+        print("="*50)
+        print(f"✓ Total samples: {len(self.mains_data):,}")
+        print(f"✓ Time period: {self.mains_data.index[0]} to {self.mains_data.index[-1]}")
+        print(f"✓ Duration: {(self.mains_data.index[-1] - self.mains_data.index[0]).days} days")
+        print(f"✓ Appliances loaded: {list(self.appliance_data.keys())}")
         
-        for app_name, app_power in self.train_appliances.items():
-            print(f"✓ {app_name.title()}: {len(app_power):,} samples, max {app_power.max():.1f}W, mean {app_power.mean():.1f}W")
+        for app_name, app_power in self.appliance_data.items():
+            print(f"✓ {app_name.title()}: max {app_power.max():.1f}W, mean {app_power.mean():.1f}W, non-zero {(app_power > 0).mean()*100:.1f}%")
+    
+    def get_ready_dataloaders(self, target_appliances=None, window_size=None, stride=None, batch_size=512):
+        """
+        One-step method: load data, preprocess, and return ready-to-use PyTorch dataloaders
+        Following toolkit standards for maximum simplicity
+        
+        Args:
+            target_appliances (list): List of target appliances (uses global config if None)
+            window_size (int): Window size (uses global config if None)
+            stride (int): Stride (uses global config if None)
+            batch_size (int): Batch size for dataloaders
             
-        print(f"\n✓ All data arrays have same length: {len(self.train_mains) == len(list(self.train_appliances.values())[0])}")
-        print("✓ Data is ready for sliding window creation!")
+        Returns:
+            tuple: (train_dataloader, val_dataloader, target_appliance_name)
+        """
+        from torch.utils.data import DataLoader, TensorDataset
+        
+        if target_appliances is None:
+            target_appliances = TARGET_APPLIANCES
+        if window_size is None:
+            window_size = WINDOW_SIZE
+        if stride is None:
+            stride = STRIDE
+            
+        print("="*60)
+        print("ONE-STEP DATA LOADING AND PREPROCESSING")
+        print("="*60)
+        
+        # Step 1: Set time windows and load data
+        train_start, train_end, _, _ = self.set_time_windows()
+        self.load_data(train_start, train_end, target_appliances, "all")
+        
+        # Step 2: Preprocess and create windows
+        processed_data = self.preprocess_and_window(window_size=window_size, stride=stride)
+        
+        # Step 3: Create PyTorch datasets and dataloaders
+        target_appliance = target_appliances[0]  # Use first appliance
+        
+        # Convert to PyTorch tensors with correct dimensions for 1D CNN
+        # CNN expects: (batch_size, channels=1, sequence_length)
+        X_train = torch.FloatTensor(processed_data['X_train']).unsqueeze(1)  # Add channel dimension
+        y_train = torch.FloatTensor(processed_data['y_train'][target_appliance])
+        X_val = torch.FloatTensor(processed_data['X_val']).unsqueeze(1)  # Add channel dimension
+        y_val = torch.FloatTensor(processed_data['y_val'][target_appliance])
+        
+        # Create datasets
+        train_dataset = TensorDataset(X_train, y_train)
+        val_dataset = TensorDataset(X_val, y_val)
+        
+        # Create dataloaders
+        train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+        val_dataloader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+        
+        print(f"✓ Ready dataloaders created!")
+        print(f"✓ Training batches: {len(train_dataloader)}")
+        print(f"✓ Validation batches: {len(val_dataloader)}")
+        print(f"✓ Target appliance: {target_appliance}")
+        
+        return train_dataloader, val_dataloader, target_appliance
     
     def save_processed_data(self, processed_data, filename=None):
         """
@@ -849,7 +674,7 @@ Appliance Statistics:
 
 def main():
     """
-    Main function demonstrating the preprocessing pipeline
+    Simplified main function demonstrating the streamlined preprocessing pipeline
     Uses all configuration variables defined at the top of the file
     """
     print("="*60)
@@ -867,8 +692,8 @@ def main():
     # Check if we should load existing processed data
     if LOAD_PROCESSED_DATA:
         try:
-            preprocessor = NILMPreprocessor()
-            processed_data = preprocessor.load_processed_data()
+            data_loader = NILMDataLoader()
+            processed_data = data_loader.load_processed_data()
             print("\n✓ Loaded existing processed data!")
             print(f"Training samples: {processed_data['stats']['train_samples']:,}")
             print(f"Validation samples: {processed_data['stats']['val_samples']:,}")
@@ -877,31 +702,28 @@ def main():
         except FileNotFoundError:
             print(f"⚠️  Processed data file not found. Starting fresh preprocessing...")
     
-    # Initialize preprocessor (uses global configuration)
-    preprocessor = NILMPreprocessor()
+    # Initialize data loader (uses global configuration)
+    data_loader = NILMDataLoader()
     
     # Check data range
-    preprocessor.check_data_range()
+    data_loader.check_data_range()
     
     # Set time windows
-    train_start, train_end, test_start, test_end = preprocessor.set_time_windows()
+    train_start, train_end, test_start, test_end = data_loader.set_time_windows()
     
-    # Load training data
-    preprocessor.load_training_data(train_start, train_end, TARGET_APPLIANCES)
-    
-    # Load testing data
-    preprocessor.load_testing_data(test_start, test_end, TARGET_APPLIANCES)
+    # Load all data (simplified approach)
+    data_loader.load_data(train_start, train_end, TARGET_APPLIANCES, "all")
     
     # Visualize data (if enabled)
     if VISUALIZE_DATA:
-        preprocessor.visualize_data()
+        data_loader.visualize_data()
     
-    # Create windows and normalize (uses global configuration)
-    processed_data = preprocessor.create_windows_and_normalize()
+    # Preprocess and create windows (combined operation)
+    processed_data = data_loader.preprocess_and_window()
     
     # Save processed data (if enabled)
     if SAVE_PROCESSED_DATA:
-        preprocessor.save_processed_data(processed_data)
+        data_loader.save_processed_data(processed_data)
     
     print("\n" + "="*60)
     print("PREPROCESSING COMPLETE!")

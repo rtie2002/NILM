@@ -9,7 +9,7 @@ import copy
 import time
 import pandas as pd
 from cnn_model import NILMCNN
-from preprocessing import NILMPreprocessor, TARGET_APPLIANCES
+from preprocessing import NILMDataLoader, TARGET_APPLIANCES
 from sklearn.metrics import mean_squared_error, mean_absolute_error, f1_score, recall_score, precision_score, matthews_corrcoef
 
 # Standard NILM metrics (from toolkit)
@@ -115,32 +115,12 @@ class NILMDataset(Dataset):
         return x, y
 
 def load_nilm_data():
-    # Load preprocessed data
-    DATASET_PATH = r"C:\Users\Raymond Tie\Desktop\NILM\datasets\ukdale.h5"
-    # Use TARGET_APPLIANCES from preprocessing.py configuration
-    # TARGET_APPLIANCES is imported from preprocessing.py
-    
-    preprocessor = NILMPreprocessor(DATASET_PATH)
-    train_start, train_end, test_start, test_end = preprocessor.set_time_windows()
-    
-    # Load data
-    preprocessor.load_training_data(train_start, train_end, TARGET_APPLIANCES)
-    preprocessor.load_testing_data(test_start, test_end, TARGET_APPLIANCES)
-    
-    # Create windows and normalize
-    processed_data = preprocessor.create_windows_and_normalize(window_size=99, stride=1)
-    
-    # Create datasets
-    # Use the first target appliance (since we're training one appliance at a time)
-    target_appliance = TARGET_APPLIANCES[0]
-    train_dataset = NILMDataset(processed_data['X_train'], processed_data['y_train'][target_appliance])
-    val_dataset = NILMDataset(processed_data['X_val'], processed_data['y_val'][target_appliance])
-    
-    # Create dataloaders
-    train_dataloader = DataLoader(train_dataset, batch_size=512, shuffle=True)
-    val_dataloader = DataLoader(val_dataset, batch_size=512, shuffle=False)
-    
-    return train_dataloader, val_dataloader, target_appliance
+    """
+    Ultra-simplified one-line data loading function
+    Following toolkit standards for maximum simplicity
+    """
+    data_loader = NILMDataLoader()
+    return data_loader.get_ready_dataloaders(batch_size=512)
 
 
 def train_model_process(model, train_dataloader, val_dataloader, epochs, target_appliance):
