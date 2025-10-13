@@ -2,14 +2,14 @@ import torch
 import numpy as np
 import matplotlib.pyplot as plt
 from cnn_model import NILMCNN
-from preprocessing import NILMPreprocessor
+from preprocessing import NILMPreprocessor, MODEL_FILENAME
 
 def test_model_predictions():
     """Test the trained model on new data"""
     
     # Load the trained model
     model = NILMCNN(window_size=99)
-    model.load_state_dict(torch.load('model_train.pth'))
+    model.load_state_dict(torch.load(MODEL_FILENAME))
     model.eval()
     
     # Load some test data

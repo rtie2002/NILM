@@ -28,7 +28,7 @@ TARGET_APPLIANCES = ['washer dryer']  # Change this to your target appliances
 # Time Window Configuration
 USE_ALL_DATA = True  # If True, use all available data; if False, use limited time range
 TRAIN_START_DATE = "2013-03-17"  # Start of UK-DALE Building 1 data
-TRAIN_END_DATE = "2013-04-05"    # End of UK-DALE Building 1 data (estimated)
+TRAIN_END_DATE = "2015-01-05"    # End of UK-DALE Building 1 data (estimated)
 
 # Sliding Window Configuration
 WINDOW_SIZE = 99  # Size of sliding window (standard: 99 time points ≈ 10 minutes)
@@ -46,9 +46,7 @@ MAINS_POWER_MAX = 20000  # Maximum mains power in watts
 APPLIANCE_POWER_MAX = 4000  # Maximum appliance power in watts
 
 # File Configuration
-OUTPUT_FILENAME = 'preprocessed_data.pkl'
-SAVE_PROCESSED_DATA = True
-LOAD_PROCESSED_DATA = False  # Set to True to load existing processed data
+MODEL_FILENAME = 'model_train.pth'  # Model filename for training
 
 # Visualization Configuration
 VISUALIZE_DATA = True
@@ -66,7 +64,6 @@ CHECK_DATA_RANGE_SAMPLE_DAYS = 1  # Days to sample for data range checking
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-from sklearn.model_selection import train_test_split
 import warnings
 import pickle
 import os
@@ -234,30 +231,8 @@ class NILMDataLoader:
         for app_name in appliance_windows.keys():
             appliance_windows[app_name] = np.array(appliance_windows[app_name])
         
-        # Normalize data if requested
-        if normalize:
-            # Normalize mains data
-            mains_mean = np.mean(mains_windows)
-            mains_std = np.std(mains_windows)
-            if mains_std == 0:
-                mains_std = 1
-            mains_windows = (mains_windows - mains_mean) / mains_std
-            
-            # Normalize appliance data
-            appliance_stats = {}
-            for app_name in appliance_windows.keys():
-                app_mean = np.mean(appliance_windows[app_name])
-                app_std = np.std(appliance_windows[app_name])
-                if app_std == 0:
-                    app_std = 1
-                appliance_windows[app_name] = (appliance_windows[app_name] - app_mean) / app_std
-                appliance_stats[app_name] = {'mean': app_mean, 'std': app_std}
-        else:
-            mains_mean = mains_std = 0
-            appliance_stats = {}
-        
         # Create train/validation split using day-based splitting
-        processed_data = self._create_data_splits(mains_windows, appliance_windows, mains_mean, mains_std, appliance_stats, window_size, stride)
+        processed_data = self._create_data_splits(mains_windows, appliance_windows, window_size, stride, normalize)
         
         self.processed_data = processed_data
         return processed_data
@@ -381,7 +356,7 @@ class NILMDataLoader:
         
         return mains_power, appliance_data
     
-    def _create_data_splits(self, mains_windows, appliance_windows, mains_mean, mains_std, appliance_stats, window_size, stride):
+    def _create_data_splits(self, mains_windows, appliance_windows, window_size, stride, normalize=True):
         """
         Create train/validation/test splits using day-based splitting
         """
@@ -433,11 +408,33 @@ class NILMDataLoader:
         y_train = {}
         y_val = {}
         y_test = {}
-        
+
+        #Create splits for appliance data
         for app_name in appliance_windows.keys():
             y_train[app_name] = appliance_windows[app_name][train_indices]
             y_val[app_name] = appliance_windows[app_name][val_indices]
             y_test[app_name] = appliance_windows[app_name][:len(val_indices)//2]
+        
+        # Apply normalization using existing normalize_data function (if requested)
+        if normalize:
+            print("Applying proper train-only normalization using existing function...")
+            
+            # Normalize mains data using existing function (handles its own initialization)
+            X_train, X_val, mains_mean, mains_std = self.normalize_data(X_train, X_val)
+            X_train, X_test, _, _ = self.normalize_data(X_train, X_test)
+            
+            # Normalize appliance data using existing function (handles its own initialization)
+            appliance_stats = {}
+            for app_name in appliance_windows.keys():
+                y_train[app_name], y_val[app_name], app_mean, app_std = self.normalize_data(y_train[app_name], y_val[app_name])
+                y_train[app_name], y_test[app_name], _, _ = self.normalize_data(y_train[app_name], y_test[app_name])
+                appliance_stats[app_name] = {'mean': app_mean, 'std': app_std}
+            
+            print("✓ Applied train-only normalization using existing function")
+        else:
+            # Initialize empty statistics when normalization is disabled
+            mains_mean = mains_std = 0
+            appliance_stats = {}
         
         # Store statistics
         stats = {
@@ -638,43 +635,6 @@ class NILMDataLoader:
         
         return train_dataloader, val_dataloader, target_appliance
     
-    def save_processed_data(self, processed_data, filename=None):
-        """
-        Save processed data to file
-        
-        Args:
-            processed_data (dict): Processed data dictionary
-            filename (str): Output filename (uses global config if None)
-        """
-        if filename is None:
-            filename = OUTPUT_FILENAME
-        print(f"\nSaving processed data to {filename}...")
-        
-        with open(filename, 'wb') as f:
-            pickle.dump(processed_data, f)
-        
-        print(f"✓ Data saved successfully!")
-        print(f"✓ File size: {os.path.getsize(filename) / (1024*1024):.1f} MB")
-    
-    def load_processed_data(self, filename=None):
-        """
-        Load processed data from file
-        
-        Args:
-            filename (str): Input filename (uses global config if None)
-            
-        Returns:
-            dict: Processed data dictionary
-        """
-        if filename is None:
-            filename = OUTPUT_FILENAME
-        print(f"Loading processed data from {filename}...")
-        
-        with open(filename, 'rb') as f:
-            processed_data = pickle.load(f)
-        
-        print(f"✓ Data loaded successfully!")
-        return processed_data
 
 
 def main():
@@ -694,19 +654,6 @@ def main():
     print(f"Random Seed: {RANDOM_SEED}")
     print("="*60)
     
-    # Check if we should load existing processed data
-    if LOAD_PROCESSED_DATA:
-        try:
-            data_loader = NILMDataLoader()
-            processed_data = data_loader.load_processed_data()
-            print("\n✓ Loaded existing processed data!")
-            print(f"Training samples: {processed_data['stats']['train_samples']:,}")
-            print(f"Validation samples: {processed_data['stats']['val_samples']:,}")
-            print(f"Testing samples: {processed_data['stats']['test_samples']:,}")
-            return processed_data
-        except FileNotFoundError:
-            print(f"⚠️  Processed data file not found. Starting fresh preprocessing...")
-    
     # Initialize data loader (uses global configuration)
     data_loader = NILMDataLoader()
     
@@ -725,10 +672,6 @@ def main():
     
     # Preprocess and create windows (combined operation)
     processed_data = data_loader.preprocess_and_window()
-    
-    # Save processed data (if enabled)
-    if SAVE_PROCESSED_DATA:
-        data_loader.save_processed_data(processed_data)
     
     print("\n" + "="*60)
     print("PREPROCESSING COMPLETE!")

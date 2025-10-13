@@ -9,8 +9,8 @@ import copy
 import time
 import pandas as pd
 from cnn_model import NILMCNN
-from preprocessing import NILMDataLoader, TARGET_APPLIANCES
-from sklearn.metrics import mean_squared_error, mean_absolute_error, f1_score, recall_score, precision_score, matthews_corrcoef
+from preprocessing import NILMDataLoader, TARGET_APPLIANCES, MODEL_FILENAME
+from sklearn.metrics import mean_squared_error, mean_absolute_error, f1_score
 
 # Standard NILM metrics (from toolkit)
 on_threshold = {'washer dryer': 20, 'fridge': 50, 'kettle': 2000, 'dish washer': 20, 'washing machine': 20, 'drill': 10, 'light': 5}
@@ -23,17 +23,6 @@ def rmse(app_name, app_gt, app_pred):
     """Root Mean Square Error"""
     return mean_squared_error(app_gt, app_pred)**0.5
 
-def rmae(app_name, app_gt, app_pred):
-    """Relative Mean Absolute Error"""
-    numerator = np.sum(np.abs(app_gt - app_pred))
-    denominator = np.sum(np.abs(app_gt))
-    return numerator / denominator if denominator > 0 else 0
-
-def nep(app_name, app_gt, app_pred):
-    """Normalized Error in Total Power"""
-    numerator = np.sum(np.abs(app_gt - app_pred))
-    denominator = np.sum(np.abs(app_gt))
-    return numerator/denominator if denominator > 0 else 0
 
 def omae(app_name, app_gt, app_pred):
     """On-state Mean Absolute Error (only when appliance is ON)"""
@@ -55,32 +44,6 @@ def f1score(app_name, app_gt, app_pred):
     pred_temp = np.where(pred_temp < threshold, 0, 1)
     return f1_score(gt_temp, pred_temp)
 
-def recall(app_name, app_gt, app_pred):
-    """Recall for ON/OFF classification"""
-    threshold = on_threshold.get(app_name, 10)
-    gt_temp = np.array(app_gt)
-    gt_temp = np.where(gt_temp < threshold, 0, 1)
-    pred_temp = np.array(app_pred)
-    pred_temp = np.where(pred_temp < threshold, 0, 1)
-    return recall_score(gt_temp, pred_temp)
-
-def precision(app_name, app_gt, app_pred):
-    """Precision for ON/OFF classification"""
-    threshold = on_threshold.get(app_name, 10)
-    gt_temp = np.array(app_gt)
-    gt_temp = np.where(gt_temp < threshold, 0, 1)
-    pred_temp = np.array(app_pred)
-    pred_temp = np.where(pred_temp < threshold, 0, 1)
-    return precision_score(gt_temp, pred_temp)
-
-def mcc(app_name, app_gt, app_pred):
-    """Matthews Correlation Coefficient"""
-    threshold = on_threshold.get(app_name, 10)
-    gt_temp = np.array(app_gt)
-    gt_temp = np.where(gt_temp < threshold, 0, 1)
-    pred_temp = np.array(app_pred)
-    pred_temp = np.where(pred_temp < threshold, 0, 1)
-    return matthews_corrcoef(gt_temp, pred_temp)
 
 def nde(app_name, app_gt, app_pred):
     """Normalized Disaggregation Error (NILMTK Standard)"""
@@ -100,19 +63,6 @@ def disaggregation_accuracy(app_name, app_gt, app_pred):
     total_energy = np.sum(np.abs(app_gt))
     return 1 - (total_error / total_energy) if total_energy > 0 else 0
 
-class NILMDataset(Dataset):
-    def __init__(self, X, y):
-        self.X = torch.FloatTensor(X)
-        self.y = torch.FloatTensor(y)
-        
-    def __len__(self):
-        return len(self.X)
-    
-    def __getitem__(self, idx):
-        # Reshape for 1D CNN: (batch_size, 1, window_size)
-        x = self.X[idx].unsqueeze(0)  # Add channel dimension
-        y = self.y[idx]
-        return x, y
 
 def load_nilm_data():
     """
@@ -255,7 +205,7 @@ def train_model_process(model, train_dataloader, val_dataloader, epochs, target_
         if avg_val_loss < best_loss:
             best_loss = avg_val_loss
             best_model_wts = copy.deepcopy(model.state_dict())
-            torch.save(model.state_dict(), 'model_train.pth')
+            torch.save(model.state_dict(), MODEL_FILENAME)
             print("🎉 New best model saved!")
         
         # Calculate time per epoch

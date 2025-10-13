@@ -1,6 +1,5 @@
 import torch
 from torch import nn
-from torchsummary import summary
 
 class NILMCNN(nn.Module):
     def __init__(self, window_size=99):
@@ -33,13 +32,3 @@ class NILMCNN(nn.Module):
         x = self.dropout(x)
         x = self.fc2(x)
         return x
-
-if __name__ == "__main__":
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}")
-    model = NILMCNN(window_size=99).to(device)
-    print(summary(model, (1, 99)))
-    
-       
-       
-       
