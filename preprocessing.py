@@ -28,7 +28,7 @@ TARGET_APPLIANCES = ['washer dryer']  # Change this to your target appliances
 # Time Window Configuration
 USE_ALL_DATA = True  # If True, use all available data; if False, use limited time range
 TRAIN_START_DATE = "2013-03-17"  # Start of UK-DALE Building 1 data
-TRAIN_END_DATE = "2015-01-05"    # End of UK-DALE Building 1 data (estimated)
+TRAIN_END_DATE = "2013-04-05"    # End of UK-DALE Building 1 data (estimated)
 
 # Sliding Window Configuration
 WINDOW_SIZE = 99  # Size of sliding window (standard: 99 time points ≈ 10 minutes)
@@ -387,53 +387,53 @@ class NILMDataLoader:
         """
         # Use day-based splitting for better temporal consistency
         original_timestamps = self.mains_data.index
-            
-            # Group by actual calendar days
-            day_groups = {}
-            for idx, timestamp in enumerate(original_timestamps):
-                day_key = timestamp.date()
-                if day_key not in day_groups:
-                    day_groups[day_key] = []
-                day_groups[day_key].append(idx)
-            
-            day_chunks = list(day_groups.values())
+        
+        # Group by actual calendar days
+        day_groups = {}
+        for idx, timestamp in enumerate(original_timestamps):
+            day_key = timestamp.date()
+            if day_key not in day_groups:
+                day_groups[day_key] = []
+            day_groups[day_key].append(idx)
+        
+        day_chunks = list(day_groups.values())
         print(f"Created {len(day_chunks)} day chunks from {len(original_timestamps)} samples")
-            
-            # Filter out days with too little data
-            min_samples = EXPECTED_SAMPLES_PER_DAY * MIN_SAMPLES_PER_DAY_RATIO
-            filtered_day_chunks = [chunk for chunk in day_chunks if len(chunk) >= min_samples]
-            print(f"After filtering: {len(filtered_day_chunks)} days with sufficient data")
-            
-            # Randomize day chunk order
-            np.random.seed(RANDOM_SEED)
-            np.random.shuffle(filtered_day_chunks)
-            
-            # Split day chunks: 80% for training, 20% for validation
-            train_chunks = int(TRAIN_SPLIT_RATIO * len(filtered_day_chunks))
-            train_day_chunks = filtered_day_chunks[:train_chunks]
-            val_day_chunks = filtered_day_chunks[train_chunks:]
-            
-            # Flatten chunk indices
-            train_indices = [idx for chunk in train_day_chunks for idx in chunk]
-            val_indices = [idx for chunk in val_day_chunks for idx in chunk]
-            
-            # Filter indices to ensure they're within bounds
+        
+        # Filter out days with too little data
+        min_samples = EXPECTED_SAMPLES_PER_DAY * MIN_SAMPLES_PER_DAY_RATIO
+        filtered_day_chunks = [chunk for chunk in day_chunks if len(chunk) >= min_samples]
+        print(f"After filtering: {len(filtered_day_chunks)} days with sufficient data")
+        
+        # Randomize day chunk order
+        np.random.seed(RANDOM_SEED)
+        np.random.shuffle(filtered_day_chunks)
+        
+        # Split day chunks: 80% for training, 20% for validation
+        train_chunks = int(TRAIN_SPLIT_RATIO * len(filtered_day_chunks))
+        train_day_chunks = filtered_day_chunks[:train_chunks]
+        val_day_chunks = filtered_day_chunks[train_chunks:]
+        
+        # Flatten chunk indices
+        train_indices = [idx for chunk in train_day_chunks for idx in chunk]
+        val_indices = [idx for chunk in val_day_chunks for idx in chunk]
+        
+        # Filter indices to ensure they're within bounds
         max_index = len(mains_windows) - 1
-            train_indices = [idx for idx in train_indices if idx <= max_index]
-            val_indices = [idx for idx in val_indices if idx <= max_index]
-            
-            print(f"Training indices: {len(train_indices):,} samples")
-            print(f"Validation indices: {len(val_indices):,} samples")
-            
+        train_indices = [idx for idx in train_indices if idx <= max_index]
+        val_indices = [idx for idx in val_indices if idx <= max_index]
+        
+        print(f"Training indices: {len(train_indices):,} samples")
+        print(f"Validation indices: {len(val_indices):,} samples")
+        
         # Create splits
         X_train = mains_windows[train_indices]
         X_val = mains_windows[val_indices]
         X_test = X_val[:len(X_val)//2]  # Use half of validation as test
-            
-            y_train = {}
-            y_val = {}
-            y_test = {}
-            
+        
+        y_train = {}
+        y_val = {}
+        y_test = {}
+        
         for app_name in appliance_windows.keys():
             y_train[app_name] = appliance_windows[app_name][train_indices]
             y_val[app_name] = appliance_windows[app_name][val_indices]
