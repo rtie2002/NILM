@@ -383,56 +383,61 @@ class NILMDataLoader:
     
     def _create_data_splits(self, mains_windows, appliance_windows, mains_mean, mains_std, appliance_stats, window_size, stride):
         """
-        Create train/validation/test splits using day-based splitting (FIXED VERSION)
-        Maintains temporal continuity for realistic NILM evaluation
+        Create train/validation/test splits using day-based splitting
         """
-        # Calculate how many windows correspond to each day
-        samples_per_day = EXPECTED_SAMPLES_PER_DAY
-        windows_per_day = (samples_per_day - window_size + 1) // stride
-        
-        # Calculate total days from window count
-        total_days = len(mains_windows) // windows_per_day
-        
-        # Create day-based indices (FIXED: map windows to days correctly)
-        train_windows = []
-        val_windows = []
-        
-        # Split days: 80% for training, 20% for validation
-        train_days = int(TRAIN_SPLIT_RATIO * total_days)
-        
-        for day in range(total_days):
-            start_window = day * windows_per_day
-            end_window = min((day + 1) * windows_per_day, len(mains_windows))
-            day_windows = list(range(start_window, end_window))
+        # Use day-based splitting for better temporal consistency
+        original_timestamps = self.mains_data.index
             
-            if day < train_days:
-                train_windows.extend(day_windows)
-            else:
-                val_windows.extend(day_windows)
-        
-        # Filter out any invalid indices
-        train_windows = [w for w in train_windows if w < len(mains_windows)]
-        val_windows = [w for w in val_windows if w < len(mains_windows)]
-        
-        print(f"Total windows: {len(mains_windows):,}")
-        print(f"Total days: {total_days}")
-        print(f"Training days: {train_days}")
-        print(f"Training windows: {len(train_windows):,} samples")
-        print(f"Validation windows: {len(val_windows):,} samples")
-        
+            # Group by actual calendar days
+            day_groups = {}
+            for idx, timestamp in enumerate(original_timestamps):
+                day_key = timestamp.date()
+                if day_key not in day_groups:
+                    day_groups[day_key] = []
+                day_groups[day_key].append(idx)
+            
+            day_chunks = list(day_groups.values())
+        print(f"Created {len(day_chunks)} day chunks from {len(original_timestamps)} samples")
+            
+            # Filter out days with too little data
+            min_samples = EXPECTED_SAMPLES_PER_DAY * MIN_SAMPLES_PER_DAY_RATIO
+            filtered_day_chunks = [chunk for chunk in day_chunks if len(chunk) >= min_samples]
+            print(f"After filtering: {len(filtered_day_chunks)} days with sufficient data")
+            
+            # Randomize day chunk order
+            np.random.seed(RANDOM_SEED)
+            np.random.shuffle(filtered_day_chunks)
+            
+            # Split day chunks: 80% for training, 20% for validation
+            train_chunks = int(TRAIN_SPLIT_RATIO * len(filtered_day_chunks))
+            train_day_chunks = filtered_day_chunks[:train_chunks]
+            val_day_chunks = filtered_day_chunks[train_chunks:]
+            
+            # Flatten chunk indices
+            train_indices = [idx for chunk in train_day_chunks for idx in chunk]
+            val_indices = [idx for chunk in val_day_chunks for idx in chunk]
+            
+            # Filter indices to ensure they're within bounds
+        max_index = len(mains_windows) - 1
+            train_indices = [idx for idx in train_indices if idx <= max_index]
+            val_indices = [idx for idx in val_indices if idx <= max_index]
+            
+            print(f"Training indices: {len(train_indices):,} samples")
+            print(f"Validation indices: {len(val_indices):,} samples")
+            
         # Create splits
-        X_train = mains_windows[train_windows]
-        X_val = mains_windows[val_windows]
+        X_train = mains_windows[train_indices]
+        X_val = mains_windows[val_indices]
         X_test = X_val[:len(X_val)//2]  # Use half of validation as test
-        
-        y_train = {}
-        y_val = {}
-        y_test = {}
-        
+            
+            y_train = {}
+            y_val = {}
+            y_test = {}
+            
         for app_name in appliance_windows.keys():
-            y_train[app_name] = appliance_windows[app_name][train_windows]
-            y_val[app_name] = appliance_windows[app_name][val_windows]
-            y_test[app_name] = appliance_windows[app_name][val_windows[:len(val_windows)//2]]
+            y_train[app_name] = appliance_windows[app_name][train_indices]
+            y_val[app_name] = appliance_windows[app_name][val_indices]
+            y_test[app_name] = appliance_windows[app_name][:len(val_indices)//2]
         
         # Store statistics
         stats = {
