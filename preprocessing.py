@@ -297,6 +297,15 @@ class NILMDataLoader:
                     # Find intersection of time indices
                     common_timestamps = mains_power.index.intersection(app_power.index)
                     
+                    # Count data loss due to timestamp mismatch
+                    mains_original = len(mains_power)
+                    app_original = len(app_power)
+                    common_count = len(common_timestamps)
+                    mains_lost = mains_original - common_count
+                    app_lost = app_original - common_count
+                    
+                    print(f"  📊 {app_name} Data Loss: Mains lost {mains_lost:,}/{mains_original:,} ({mains_lost/mains_original*100:.1f}%), App lost {app_lost:,}/{app_original:,} ({app_lost/app_original*100:.1f}%)")
+                    
                     if len(common_timestamps) > 0:
                         # Align both to common timestamps only
                         mains_aligned = mains_power.loc[common_timestamps]
@@ -308,7 +317,11 @@ class NILMDataLoader:
                         impossible_count = impossible_mask.sum()
                         
                         if impossible_count > 0:
-                            print(f"  ⚠ FIXING {impossible_count:,} samples where {app_name} power > mains power")
+                            # Calculate how much power was exceeding mains
+                            excess_power = (app_aligned[impossible_mask] - mains_aligned[impossible_mask]).sum()
+                            max_excess = (app_aligned[impossible_mask] - mains_aligned[impossible_mask]).max()
+                            print(f"  ⚠ FIXING {impossible_count:,} samples where {app_name} power > mains power ({impossible_count/len(app_aligned)*100:.1f}%)")
+                            print(f"     Total excess power: {excess_power:,.0f}W, Max excess: {max_excess:.0f}W")
                             # Cap appliance power at mains power level
                             app_aligned = np.minimum(app_aligned, mains_aligned)
                         
@@ -316,6 +329,7 @@ class NILMDataLoader:
                         mains_power = mains_aligned
                         app_power = app_aligned
                     else:
+                        print(f"  ❌ NO COMMON TIMESTAMPS - {app_name} data completely unusable!")
                         # No common timestamps - create empty series
                         app_power = pd.Series(0, index=mains_power.index)
                 else:
