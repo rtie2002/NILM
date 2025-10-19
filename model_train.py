@@ -109,12 +109,12 @@ def train_model_process(model, train_dataloader, val_dataloader, epochs, target_
         for step, (b_x, b_y) in enumerate(train_dataloader):
             b_x = b_x.to(device)
             b_y = b_y.to(device)
-
-            optimizer.zero_grad()
-            output = model(b_x)
-            loss = criterion(output, b_y)
-            loss.backward()
-            optimizer.step()
+            
+            optimizer.zero_grad() #Step 1: Clear Gradients
+            output = model(b_x) #Step 2: Forward Pass
+            loss = criterion(output, b_y) #Step 3: Calculate Loss
+            loss.backward() #Step 4: Backpropagation
+            optimizer.step() #Step 5: Update Weights
 
             train_loss += loss.item() * b_x.size(0)
             train_num += b_x.size(0)

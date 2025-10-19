@@ -19,3 +19,4 @@ datasets/
 toolkit/
 *.pkl
 *.pth
+/example project
