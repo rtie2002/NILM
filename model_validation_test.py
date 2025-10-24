@@ -20,7 +20,7 @@ warnings.filterwarnings('ignore')
 # USER SETTINGS - CHANGE THESE
 # ============================================================================
 BUILDING_ID = 1                           # UK-DALE building number (1, 2, 3, 4, or 5)
-TEST_DATE = "2014-12-08"                  # Test date: YYYY-MM-DD (one full day)
+TEST_DATE = "2014-12-07"                  # Test date: YYYY-MM-DD (one full day)
 MODEL_FILENAME = 'model_train.pth'        # Trained model file
 # ============================================================================
 
@@ -220,6 +220,88 @@ def denormalize_predictions(predictions, targets, normalization_stats):
     
     return real_predictions, real_targets
 
+def plot_combined_analysis(mains_data, real_predictions, real_targets, metrics, test_date):
+    """Plot combined analysis showing total power, washer dryer real vs predicted"""
+    print("Creating combined power analysis plot...")
+    
+    # Create time index for plotting
+    prediction_length = len(real_predictions)
+    print(f"Creating time index for {prediction_length} predictions...")
+    
+    # Create a time index that matches the prediction length
+    if len(mains_data) >= prediction_length:
+        time_index = mains_data.index[:prediction_length]
+    else:
+        # Extend the time index if needed
+        original_index = mains_data.index
+        time_delta = original_index[1] - original_index[0] if len(original_index) > 1 else pd.Timedelta(seconds=6)
+        time_index = pd.date_range(start=original_index[0], periods=prediction_length, freq=time_delta)
+    
+    # Sample data for better visualization
+    max_points = 3000  # Maximum points to plot
+    if len(real_predictions) > max_points:
+        step = len(real_predictions) // max_points
+        time_index = time_index[::step]
+        real_predictions = real_predictions[::step]
+        real_targets = real_targets[::step]
+        # Also sample mains data to match
+        mains_sampled = mains_data.iloc[::step]
+        print(f"Sampled data to {len(real_predictions)} points for better visualization")
+    else:
+        mains_sampled = mains_data.iloc[:len(real_predictions)]
+    
+    # Create combined plot
+    plt.figure(figsize=(16, 10))
+    
+    # Plot total power consumption (background)
+    plt.plot(time_index, mains_sampled.values, 'g-', label='Total Power Consumption', linewidth=2, alpha=0.6)
+    
+    # Plot real and predicted washer dryer power (foreground)
+    plt.plot(time_index, real_targets, 'b-', label='Real Washer Dryer Power', linewidth=2, alpha=0.9)
+    plt.plot(time_index, real_predictions, 'r-', label='Predicted Washer Dryer Power', linewidth=2, alpha=0.9)
+    
+    plt.title(f'Power Consumption Analysis - {test_date}\nTotal Power vs Washer Dryer Disaggregation', 
+              fontsize=16, fontweight='bold')
+    plt.xlabel('Time (24-hour format)', fontsize=12)
+    plt.ylabel('Power (W)', fontsize=12)
+    plt.legend(fontsize=12, loc='upper right')
+    plt.grid(True, alpha=0.3)
+    
+    # Set y-axis to start from 0
+    max_total = max(mains_sampled.values)
+    max_app = max(max(real_targets), max(real_predictions))
+    plt.ylim(0, max(max_total, max_app) * 1.1)
+    
+    # Format x-axis to show 24-hour time format
+    import matplotlib.dates as mdates
+    plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))
+    plt.gca().xaxis.set_major_locator(mdates.HourLocator(interval=4))  # Show every 4 hours
+    plt.gca().xaxis.set_minor_locator(mdates.HourLocator(interval=1))  # Minor ticks every hour
+    plt.xticks(rotation=45)
+    
+    # Add statistics text boxes
+    # Total power stats
+    avg_total = np.mean(mains_sampled.values)
+    max_total = np.max(mains_sampled.values)
+    
+    # Washer dryer stats
+    avg_wd = np.mean(real_targets)
+    max_wd = np.max(real_targets)
+    
+    plt.text(0.02, 0.98, f'TOTAL POWER:\nAvg: {avg_total:.1f}W\nMax: {max_total:.1f}W', 
+             transform=plt.gca().transAxes, fontsize=10, verticalalignment='top',
+             bbox=dict(boxstyle='round', facecolor='lightgreen', alpha=0.8))
+    
+    plt.text(0.02, 0.75, f'WASHER DRYER:\nMAE: {metrics["mae"]:.1f}W\nRMSE: {metrics["rmse"]:.1f}W\nF1: {metrics["f1"]:.3f}', 
+             transform=plt.gca().transAxes, fontsize=10, verticalalignment='top',
+             bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.8))
+    
+    plt.tight_layout()
+    plot_filename = f'washer_dryer_analysis_{test_date.replace("-", "_")}.png'
+    plt.savefig(plot_filename, dpi=300, bbox_inches='tight')
+    print(f"✓ Combined analysis plot saved as '{plot_filename}'")
+    plt.show()
+
 def plot_validation_results(mains_data, real_predictions, real_targets, metrics, test_date):
     """Simple plot showing real vs predicted washer dryer power consumption"""
     print("Creating simple washer dryer power consumption plot...")
@@ -366,6 +448,9 @@ def main():
     
     # Step 9: Create plots
     plot_validation_results(mains_data, real_predictions, real_targets, metrics, TEST_DATE)
+    
+    # Step 10: Create total power consumption plot
+    plot_total_power_consumption(mains_data, TEST_DATE)
     
     print("\n🎉 Validation completed successfully!")
     return True

@@ -20,3 +20,4 @@ toolkit/
 *.pkl
 *.pth
 /example project
+*.npy
